@@ -859,7 +859,6 @@ public:
     /// the caller, who is responsible for deleting it when done with it.
     typedef ImageInput* (*Creator)();
 
-protected:
     /// Error reporting for the plugin implementation: call this with
     /// printf-like arguments.  Note however that this is fully typesafe!
     // void error (const char *format, ...) const;
@@ -1181,13 +1180,13 @@ public:
     /// the caller, who is responsible for deleting it when done with it.
     typedef ImageOutput* (*Creator)();
 
-protected:
     /// Error reporting for the plugin implementation: call this with
     /// printf-like arguments.  Note however that this is fully typesafe!
     /// void error (const char *format, ...)
     TINYFORMAT_WRAP_FORMAT (void, error, const,
         std::ostringstream msg;, msg, append_error(msg.str());)
 
+protected:
     /// Helper routines used by write_* implementations: convert data (in
     /// the given format and stride) to the "native" format of the file
     /// (described by the 'spec' member variable), in contiguous order. This
@@ -1220,11 +1219,28 @@ protected:
                                      std::vector<unsigned char> &scratch,
                                      unsigned int dither=0,
                                      int xorigin=0, int yorigin=0, int zorigin=0);
-    /// Helper function to copy a tile of data into an image-sized buffer.
+
+    /// Helper function to copy a rectangle of data into the right spot in
+    /// an image-sized buffer. In addition to copying to the right place,
+    /// this handles data format conversion and dither (if the spec's
+    /// "oiio:dither" is nonzero, and if it's converting from a float-like
+    /// type to UINT8). The buf_format describes the type of image_buffer,
+    /// if it's TypeDesc::UNKNOWN it will be assumed to be spec.format.
+    bool copy_to_image_buffer (int xbegin, int xend, int ybegin, int yend,
+                               int zbegin, int zend, TypeDesc format,
+                               const void *data, stride_t xstride,
+                               stride_t ystride, stride_t zstride,
+                               void *image_buffer,
+                               TypeDesc buf_format = TypeDesc::UNKNOWN);
+    /// Helper function to copy a tile of data into the right spot in an
+    /// image-sized buffer. This is really just a wrapper for
+    /// copy_to_image_buffer, passing all the right parameters to copy
+    /// exactly one tile.
     bool copy_tile_to_image_buffer (int x, int y, int z, TypeDesc format,
                                     const void *data, stride_t xstride,
                                     stride_t ystride, stride_t zstride,
-                                    void *image_buffer);
+                                    void *image_buffer,
+                                    TypeDesc buf_format = TypeDesc::UNKNOWN);
 
 protected:
     ImageSpec m_spec;           ///< format spec of the currently open image
@@ -1366,7 +1382,8 @@ OIIO_API bool parallel_convert_image (
 /// Add random [-theramplitude,ditheramplitude] dither to the color channels
 /// of the image.  Dither will not be added to the alpha or z channel.  The
 /// image origin and dither seed values allow a reproducible (or variable)
-/// dither pattern.
+/// dither pattern.  If the strides are set to AutoStride, they will be
+/// assumed to be contiguous floats in data of the given dimensions.
 OIIO_API void add_dither (int nchannels, int width, int height, int depth,
                           float *data,
                           stride_t xstride, stride_t ystride, stride_t zstride,
