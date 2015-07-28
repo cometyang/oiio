@@ -30,10 +30,10 @@
 
 #include "ptex/Ptexture.h"
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "fmath.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/fmath.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -43,6 +43,11 @@ public:
     PtexInput () : m_ptex(NULL) { init(); }
     virtual ~PtexInput () { close(); }
     virtual const char * format_name (void) const { return "ptex"; }
+    virtual int supports (string_view feature) const {
+        return (feature == "arbitrary_metadata"
+             || feature == "exif"   // Because of arbitrary_metadata
+             || feature == "iptc"); // Because of arbitrary_metadata
+    }
     virtual bool open (const std::string &name, ImageSpec &newspec);
     virtual bool close ();
     virtual int current_subimage (void) const { return m_subimage; }

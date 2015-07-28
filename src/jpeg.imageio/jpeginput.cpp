@@ -31,14 +31,12 @@
 
 #include <cassert>
 #include <cstdio>
+#include <algorithm>
 
-extern "C" {
-#include "jpeglib.h"
-}
-
-#include "imageio.h"
-#include "filesystem.h"
-#include "fmath.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/color.h"
 #include "jpeg_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
@@ -55,15 +53,14 @@ OIIO_PLUGIN_EXPORTS_BEGIN
         return new JpgInput;
     }
     OIIO_EXPORT const char *jpeg_input_extensions[] = {
-        "jpg", "jpe", "jpeg", "jif", "jfif", ".jfi", NULL
+        "jpg", "jpe", "jpeg", "jif", "jfif", "jfi", NULL
     };
 
 OIIO_PLUGIN_EXPORTS_END
 
 
-static const uint32_t JPEG_MAGIC = 0xffd8ffe0, JPEG_MAGIC_OTHER_ENDIAN =  0xe0ffd8ff;
-static const uint32_t JPEG_MAGIC2 = 0xffd8ffe1, JPEG_MAGIC2_OTHER_ENDIAN =  0xe1ffd8ff;
-static const uint32_t JPEG_MAGIC3 = 0xffd8fffe, JPEG_MAGIC3_OTHER_ENDIAN =  0xfeffd8ff;
+static const uint8_t JPEG_MAGIC1 = 0xff;
+static const uint8_t JPEG_MAGIC2 = 0xd8;
 
 
 // For explanations of the error handling, see the "example.c" in the
@@ -96,6 +93,33 @@ my_output_message (j_common_ptr cinfo)
 
 
 
+static std::string 
+comp_info_to_attr (const jpeg_decompress_struct &cinfo) 
+{   
+    // Compare the current 6 samples with our known definitions
+    // to determine the corresponding subsampling attr
+    std::vector<int> comp;
+    comp.push_back(cinfo.comp_info[0].h_samp_factor);
+    comp.push_back(cinfo.comp_info[0].v_samp_factor);
+    comp.push_back(cinfo.comp_info[1].h_samp_factor);
+    comp.push_back(cinfo.comp_info[1].v_samp_factor);
+    comp.push_back(cinfo.comp_info[2].h_samp_factor);
+    comp.push_back(cinfo.comp_info[2].v_samp_factor);
+    size_t size = comp.size();
+ 
+    if (std::equal(JPEG_444_COMP, JPEG_444_COMP+size, comp.begin()))
+        return JPEG_444_STR;
+    else if (std::equal(JPEG_422_COMP, JPEG_422_COMP+size, comp.begin()))
+        return JPEG_422_STR;
+    else if (std::equal(JPEG_420_COMP, JPEG_420_COMP+size, comp.begin()))
+        return JPEG_420_STR;
+    else if (std::equal(JPEG_411_COMP, JPEG_411_COMP+size, comp.begin()))
+        return JPEG_411_STR;
+    return "";
+}
+
+
+
 void
 JpgInput::jpegerror (my_error_ptr myerr, bool fatal)
 {
@@ -122,13 +146,11 @@ JpgInput::valid_file (const std::string &filename) const
         return false;
 
     // Check magic number to assure this is a JPEG file
-    uint32_t magic = 0;
-    bool ok = (fread (&magic, sizeof(magic), 1, fd) == 1);
+    uint8_t magic[2] = {0, 0};
+    bool ok = (fread (magic, sizeof(magic), 1, fd) == 1);
     fclose (fd);
 
-    if (magic != JPEG_MAGIC && magic != JPEG_MAGIC_OTHER_ENDIAN &&
-        magic != JPEG_MAGIC2 && magic != JPEG_MAGIC2_OTHER_ENDIAN &&
-        magic != JPEG_MAGIC3 && magic != JPEG_MAGIC3_OTHER_ENDIAN) {
+    if (magic[0] != JPEG_MAGIC1 || magic[1] != JPEG_MAGIC2) {
         ok = false;
     }
     return ok;
@@ -160,19 +182,18 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
     }
 
     // Check magic number to assure this is a JPEG file
-    uint32_t magic = 0;
-    if (fread (&magic, sizeof(magic), 1, m_fd) != 1) {
+    uint8_t magic[2] = {0, 0};
+    if (fread (magic, sizeof(magic), 1, m_fd) != 1) {
         error ("Empty file \"%s\"", name.c_str());
         close_file ();
         return false;
     }
 
     rewind (m_fd);
-    if (magic != JPEG_MAGIC && magic != JPEG_MAGIC_OTHER_ENDIAN &&
-        magic != JPEG_MAGIC2 && magic != JPEG_MAGIC2_OTHER_ENDIAN &&
-        magic != JPEG_MAGIC3 && magic != JPEG_MAGIC3_OTHER_ENDIAN) {
+    if (magic[0] != JPEG_MAGIC1 || magic[1] != JPEG_MAGIC2) {
         close_file ();
-        error ("\"%s\" is not a JPEG file, magic number doesn't match (was 0x%x)", name.c_str(), magic);
+        error ("\"%s\" is not a JPEG file, magic number doesn't match (was 0x%x%x)",
+               name.c_str(), int(magic[0]), int(magic[1]));
         return false;
     }
 
@@ -202,6 +223,17 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
         error ("Bad JPEG header for \"%s\"", filename().c_str());
         return false;
     }
+
+    int nchannels = m_cinfo.num_components;
+
+    if (m_cinfo.jpeg_color_space == JCS_CMYK ||
+        m_cinfo.jpeg_color_space == JCS_YCCK) {
+        // CMYK jpegs get converted by us to RGB
+        m_cinfo.out_color_space = JCS_CMYK;     // pre-convert YCbCrK->CMYK
+        nchannels = 3;
+        m_cmyk = true;
+    }
+
     if (m_raw)
         m_coeffs = jpeg_read_coefficients (&m_cinfo);
     else
@@ -211,11 +243,23 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
     m_next_scanline = 0;                        // next scanline we'll read
 
     m_spec = ImageSpec (m_cinfo.output_width, m_cinfo.output_height,
-                        m_cinfo.output_components, TypeDesc::UINT8);
+                        nchannels, TypeDesc::UINT8);
 
     // Assume JPEG is in sRGB unless the Exif or XMP tags say otherwise.
     m_spec.attribute ("oiio:ColorSpace", "sRGB");
 
+    if (m_cinfo.jpeg_color_space == JCS_CMYK)
+        m_spec.attribute ("jpeg:ColorSpace", "CMYK");
+    else if (m_cinfo.jpeg_color_space == JCS_YCCK)
+        m_spec.attribute ("jpeg:ColorSpace", "YCbCrK");
+
+    // If the chroma subsampling is detected and matches something
+    // we expect, then set an attribute so that it can be preserved
+    // in future operations.
+    std::string subsampling = comp_info_to_attr(m_cinfo);
+    if (!subsampling.empty())
+        m_spec.attribute(JPEG_SUBSAMPLING_ATTR, subsampling);
+        
     for (jpeg_saved_marker_ptr m = m_cinfo.marker_list;  m;  m = m->next) {
         if (m->marker == (JPEG_APP0+1) &&
                 ! strcmp ((const char *)m->data, "Exif")) {
@@ -248,8 +292,113 @@ JpgInput::open (const std::string &name, ImageSpec &newspec)
         }
     }
 
+    // Handle density/pixelaspect. We need to do this AFTER the exif is
+    // decoded, in case it contains useful information.
+    float xdensity = m_spec.get_float_attribute ("XResolution");
+    float ydensity = m_spec.get_float_attribute ("YResolution");
+    if (! xdensity || ! ydensity) {
+        xdensity = float(m_cinfo.X_density);
+        ydensity = float(m_cinfo.Y_density);
+        if (xdensity && ydensity) {
+            m_spec.attribute ("XResolution", xdensity);
+            m_spec.attribute ("YResolution", ydensity);
+        }
+    }
+    if (xdensity && ydensity) {
+        float aspect = ydensity/xdensity;
+        if (aspect != 1.0f)
+            m_spec.attribute ("PixelAspectRatio", aspect);
+        switch (m_cinfo.density_unit) {
+        case 0 : m_spec.attribute ("ResolutionUnit", "none"); break;
+        case 1 : m_spec.attribute ("ResolutionUnit", "in");   break;
+        case 2 : m_spec.attribute ("ResolutionUnit", "cm");   break;
+        }
+    }
+
+    read_icc_profile(&m_cinfo, m_spec); /// try to read icc profile
+
     newspec = m_spec;
     return true;
+}
+
+
+
+bool
+JpgInput::read_icc_profile (j_decompress_ptr cinfo, ImageSpec& spec)
+{
+    int num_markers = 0;
+    std::vector<unsigned char> icc_buf;
+    unsigned int total_length = 0;
+    const int MAX_SEQ_NO = 255;
+    unsigned char marker_present[MAX_SEQ_NO + 1];   // one extra is used to store the flag if marker is found, set to one if marker is found
+    unsigned int data_length[MAX_SEQ_NO + 1];       // store the size of each marker
+    unsigned int data_offset[MAX_SEQ_NO + 1];       // store the offset of each marker
+    memset (marker_present, 0, (MAX_SEQ_NO + 1));
+
+    for (jpeg_saved_marker_ptr m = cinfo->marker_list; m; m = m->next) {
+        if (m->marker == (JPEG_APP0 + 2) &&
+             !strcmp((const char *)m->data, "ICC_PROFILE")) {
+            if (num_markers == 0)
+                num_markers = GETJOCTET(m->data[13]);
+            else if (num_markers != GETJOCTET(m->data[13]))
+                return false;
+            int seq_no = GETJOCTET(m->data[12]);
+            if (seq_no <= 0 || seq_no > num_markers)
+                return false;
+            if (marker_present[seq_no])   // duplicate marker
+                return false;
+            marker_present[seq_no] = 1;   // flag found marker
+            data_length[seq_no] = m->data_length - ICC_HEADER_SIZE;
+        }
+    }
+    if (num_markers == 0)
+        return false;
+
+    // checking for missing markers
+    for (int seq_no = 1; seq_no <= num_markers; seq_no++){
+        if (marker_present[seq_no] == 0)
+            return false;   // missing sequence number
+        data_offset[seq_no] = total_length;
+        total_length += data_length[seq_no];
+    }
+
+    if (total_length == 0)
+        return false; // found only empty markers
+
+    icc_buf.resize (total_length*sizeof(JOCTET));
+
+    // and fill it in
+    for (jpeg_saved_marker_ptr m = cinfo->marker_list; m; m = m->next) {
+        if (m->marker == (JPEG_APP0 + 2) &&
+             !strcmp((const char *)m->data, "ICC_PROFILE")) {
+            int seq_no = GETJOCTET(m->data[12]);
+            memcpy (&icc_buf[0] + data_offset[seq_no],
+                    m->data + ICC_HEADER_SIZE, data_length[seq_no]);
+        }
+    }
+    spec.attribute(ICC_PROFILE_ATTR, TypeDesc(TypeDesc::UINT8, total_length), &icc_buf[0]);
+    return true;
+}
+
+
+
+static void
+cmyk_to_rgb (int n, const unsigned char *cmyk, size_t cmyk_stride,
+             unsigned char *rgb, size_t rgb_stride)
+{
+    for ( ; n; --n, cmyk += cmyk_stride, rgb += rgb_stride) {
+        // JPEG seems to store CMYK as 1-x
+        float C = convert_type<unsigned char,float>(cmyk[0]);
+        float M = convert_type<unsigned char,float>(cmyk[1]);
+        float Y = convert_type<unsigned char,float>(cmyk[2]);
+        float K = convert_type<unsigned char,float>(cmyk[3]);
+        float R = C * K;
+        float G = M * K;
+        float B = Y * K;
+        rgb[0] = convert_type<float,unsigned char>(R);
+        rgb[1] = convert_type<float,unsigned char>(G);
+        rgb[2] = convert_type<float,unsigned char>(B);
+    }
 }
 
 
@@ -279,14 +428,27 @@ JpgInput::read_native_scanline (int y, int z, void *data)
         return false;
     }
 
+    void *readdata = data;
+    if (m_cmyk) {
+        // If the file's data is CMYK, read into a 4-channel buffer, then
+        // we'll have to convert.
+        m_cmyk_buf.resize (m_spec.width * 4);
+        readdata = &m_cmyk_buf[0];
+        ASSERT (m_spec.nchannels == 3);
+    }
+
     for (  ;  m_next_scanline <= y;  ++m_next_scanline) {
         // Keep reading until we've read the scanline we really need
-        if (jpeg_read_scanlines (&m_cinfo, (JSAMPLE **)&data, 1) != 1
+        if (jpeg_read_scanlines (&m_cinfo, (JSAMPLE **)&readdata, 1) != 1
             || m_fatalerr) {
             error ("JPEG failed scanline read (\"%s\")", filename().c_str());
             return false;
         }
     }
+
+    if (m_cmyk)
+        cmyk_to_rgb (m_spec.width, (unsigned char *)readdata, 4,
+                     (unsigned char *)data, 3);
 
     return true;
 }

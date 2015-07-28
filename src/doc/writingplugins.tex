@@ -61,7 +61,7 @@ real-world example of writing a JPEG/JFIF plug-in.
   All of these items must be inside an `{\cf extern "C"}' block in order
   to avoid name mangling by the C++ compiler, and we provide handy
   macros {\cf OIIO_PLUGIN_EXPORTS_BEGIN} and {\cf OIIO_PLUGIN_EXPORTS_END}
-  to mamke this easy.  Depending on your
+  to make this easy.  Depending on your
   compiler, you may need to use special commands to dictate that the
   symbols will be exported in the DSO; we provide a special {\cf
   OIIO_EXPORT} macro for this purpose, defined in {\fn export.h}.
@@ -171,7 +171,7 @@ The remainder of this section simply lists the full implementation of
 our JPEG reader, which relies heavily on the open source {\fn jpeg-6b}
 library to perform the actual JPEG decoding.
 
-\includedcode{../jpeg.imageio/jpeginput.cpp}
+\tinyincludedcode{../jpeg.imageio/jpeginput.cpp}
 
 
 
@@ -287,6 +287,14 @@ real-world example of writing a JPEG/JFIF plug-in.
       ``deep'' data images.
   \end{enumerate}
 
+  It is not strictly required, but certainly appreciated, if a file format
+  does not support tiles, to nonetheless accept an \ImageSpec that specifies
+  tile sizes by allocating a full-image buffer in {\cf open()}, providing an
+  implementation of {\cf write_tile()} that copies the tile of data to the
+  right spots in the buffer, and having {\cf close()} then call 
+  {\cf write_scanlines} to process the buffer now that the image has been
+  fully sent.
+
   Here is how the class definition looks for our JPEG example.  Note
   that the JPEG/JFIF file format does not support multiple subimages
   or tiled images.
@@ -297,7 +305,7 @@ real-world example of writing a JPEG/JFIF plug-in.
         JpgOutput () { init(); }
         virtual ~JpgOutput () { close(); }
         virtual const char * format_name (void) const { return "jpeg"; }
-        virtual bool supports (const std::string &property) const { return false; }
+        virtual int supports (string_view property) const { return false; }
         virtual bool open (const std::string &name, const ImageSpec &spec,
                            bool append=false);
         virtual bool write_scanline (int y, int z, TypeDesc format,
@@ -325,12 +333,13 @@ an \ImageInput implementation, which only needs to read scanlines or
 tiles in their native format and then have the super-class handle the
 translation.  But don't worry, all the heavy lifting can be accomplished
 with the following helper functions provided as protected member
-functions of \ImageOutput:
+functions of \ImageOutput that convert a scanline, tile, or rectangular
+array of values from one format to the native format(s) of the file.
 
-\apiitem{const void * {\ce to_native_scanline} (TypeDesc format,
-                                    const void *data, \\ \bigspc stride_t xstride,
-                                    std::vector<unsigned char>
-                                    \&scratch);}
+\apiitem{const void * {\ce to_native_scanline} (TypeDesc format, const void *data, \\
+                \bigspc stride_t xstride, std::vector<unsigned char> \&scratch, \\
+                                    \bigspc unsigned int dither=0,
+                                    int yorigin=0, int zorigin=0)}
 
 Convert a full scanline of pixels (pointed to by \emph{data}) with the
 given \emph{format} and strides into contiguous pixels in the native
@@ -344,10 +353,11 @@ caller doesn't need to worry about thread safety or freeing any
 allocated memory (other than eventually destroying the scratch vector).
 \apiend
 
-\apiitem{const void * {\ce to_native_tile} (TypeDesc format, const
-  void *data,\\ \bigspc
-                                stride_t xstride, stride_t ystride, stride_t zstride,\\ \bigspc
-                                std::vector<unsigned char> \&scratch);}
+\apiitem{const void * {\ce to_native_tile} (TypeDesc format, const void *data,\\
+                            \bigspc stride_t xstride, stride_t ystride, stride_t zstride,\\
+                            \bigspc std::vector<unsigned char> \&scratch,
+                            unsigned int dither=0, \\ \bigspc int xorigin=0,
+                             int yorigin=0, int zorigin=0)}
 
 Convert a full tile of pixels (pointed to by \emph{data}) with the given
 \emph{format} and strides into contiguous pixels in the native format
@@ -362,13 +372,16 @@ allocated memory (other than eventually destroying the scratch vector).
 
 \apiend
 
-\apiitem{const void * {\ce to_native_rectangle} (int xbegin, int xend, int ybegin, int yend, \\ \bigspc
-                                     int zbegin, int zend, 
+\apiitem{const void * {\ce to_native_rectangle} (int xbegin, int xend, \\
+                                    \bigspc int ybegin, int yend,
+                                     int zbegin, int zend, \\ \bigspc
                                      TypeDesc format, const void
                                      *data, \\ \bigspc
                                      stride_t xstride, stride_t ystride,
                                      stride_t zstride, \\ \bigspc
-                                     std::vector<unsigned char> \&scratch);}
+                                     std::vector<unsigned char> \&scratch,
+                            unsigned int dither=0, \\ \bigspc int xorigin=0,
+                             int yorigin=0, int zorigin=0)}
 
 Convert a rectangle of pixels (pointed to by \emph{data}) with the given
 \emph{format}, dimensions, and strides into contiguous pixels in the
@@ -384,6 +397,14 @@ scratch vector).
 
 \apiend
 
+For {\cf float} to 8 bit integer conversions only, if {\cf dither} parameter
+is nonzero, random dither will be added to reduce quantization banding
+artifacts; in this case, the specific nonzero {\cf dither} value is used as
+a seed for the hash function that produces the per-pixel dither amounts, and
+the optional {\cf origin} parameters help it to align the pixels to the
+right position in the dither pattern.
+
+
 \bigskip
 \bigskip
 
@@ -392,7 +413,7 @@ The remainder of this section simply lists the full implementation of
 our JPEG writer, which relies heavily on the open source {\fn jpeg-6b}
 library to perform the actual JPEG encoding.
 
-\includedcode{../jpeg.imageio/jpegoutput.cpp}
+\tinyincludedcode{../jpeg.imageio/jpegoutput.cpp}
 
 
 \section{Tips and Conventions}

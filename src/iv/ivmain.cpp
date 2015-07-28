@@ -48,13 +48,13 @@
 
 #include <boost/foreach.hpp>
 
-#include "imageio.h"
 #include "imageviewer.h"
-#include "timer.h"
-#include "argparse.h"
-#include "sysutil.h"
-#include "strutil.h"
-#include "imagecache.h"
+#include "OpenImageIO/timer.h"
+#include "OpenImageIO/argparse.h"
+#include "OpenImageIO/sysutil.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/imagecache.h"
+#include "OpenImageIO/filesystem.h"
 
 OIIO_NAMESPACE_USING;
 
@@ -113,6 +113,7 @@ getargs (int argc, char *argv[])
 int
 main (int argc, char *argv[])
 {
+    Filesystem::convert_native_arguments (argc, (const char **)argv);
     getargs (argc, argv);
 
     if (! foreground_mode)

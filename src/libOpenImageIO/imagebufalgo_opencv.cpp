@@ -41,11 +41,11 @@
 #include <iostream>
 #include <map>
 
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "dassert.h"
-#include "thread.h"
-#include "sysutil.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/sysutil.h"
 
 
 
@@ -66,17 +66,17 @@ ImageBufAlgo::from_IplImage (ImageBuf &dst, const IplImage *ipl,
 #ifdef USE_OPENCV
     TypeDesc srcformat;
     switch (ipl->depth) {
-    case IPL_DEPTH_8U :
+    case int(IPL_DEPTH_8U) :
         srcformat = TypeDesc::UINT8;  break;
-    case IPL_DEPTH_8S :
+    case int(IPL_DEPTH_8S) :
         srcformat = TypeDesc::INT8;  break;
-    case IPL_DEPTH_16U :
+    case int(IPL_DEPTH_16U) :
         srcformat = TypeDesc::UINT16;  break;
-    case IPL_DEPTH_16S :
+    case int(IPL_DEPTH_16S) :
         srcformat = TypeDesc::INT16;  break;
-    case IPL_DEPTH_32F :
+    case int(IPL_DEPTH_32F) :
         srcformat = TypeDesc::FLOAT;  break;
-    case IPL_DEPTH_64F :
+    case int(IPL_DEPTH_64F) :
         srcformat = TypeDesc::DOUBLE;  break;
     default:
         DASSERT (0 && "unknown IplImage type");
@@ -175,7 +175,7 @@ private:
 static CameraHolder cameras;
 #endif
 
-};
+}
 
 
 bool

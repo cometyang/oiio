@@ -36,12 +36,12 @@
 
 #include "png_pvt.h"
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "thread.h"
-#include "strutil.h"
-#include "fmath.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/fmath.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -160,7 +160,8 @@ PNGInput::open (const std::string &name, ImageSpec &newspec)
     png_set_sig_bytes (m_png, 8);  // already read 8 bytes
 
     PNG_pvt::read_info (m_png, m_info, m_bit_depth, m_color_type,
-                        m_interlace_type, m_bg, m_spec);
+                        m_interlace_type, m_bg, m_spec,
+                        m_keep_unassociated_alpha);
 
     newspec = spec ();
     m_next_scanline = 0;

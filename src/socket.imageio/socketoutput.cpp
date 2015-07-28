@@ -30,7 +30,7 @@
 
 #include <boost/lexical_cast.hpp>
 
-#include "imageio.h"
+#include "OpenImageIO/imageio.h"
 #include "socket_pvt.h"
 
 
@@ -54,6 +54,15 @@ SocketOutput::SocketOutput()
     : socket (io)
 {
 
+}
+
+
+
+int
+SocketOutput::supports (string_view feature) const
+{
+    return (feature == "alpha" ||
+            feature == "nchannels");
 }
 
 
@@ -85,7 +94,10 @@ SocketOutput::write_scanline (int y, int z, TypeDesc format,
     try {
         socket_pvt::socket_write (socket, format, data, m_spec.scanline_bytes ());
     } catch (boost::system::system_error &err) {
-        error ("Error while reading: %s", err.what ());
+        error ("Error while writing: %s", err.what ());
+        return false;
+    } catch (...) {
+        error ("Error while writing: unknown exception");
         return false;
     }
 
@@ -106,7 +118,10 @@ SocketOutput::write_tile (int x, int y, int z,
     try {
         socket_pvt::socket_write (socket, format, data, m_spec.tile_bytes ());
     } catch (boost::system::system_error &err) {
-        error ("Error while reading: %s", err.what ());
+        error ("Error while writing: %s", err.what ());
+        return false;
+    } catch (...) {
+        error ("Error while writing: unknown exception");
         return false;
     }
 
@@ -143,7 +158,10 @@ SocketOutput::send_spec_to_server(const ImageSpec& spec)
                 sizeof (boost::uint32_t)));
         boost::asio::write (socket, buffer (spec_xml.c_str (), spec_xml.length ()));
     } catch (boost::system::system_error &err) {
-        error ("Error while writing: %s", err.what ());
+        error ("Error while send_spec_to_server: %s", err.what ());
+        return false;
+    } catch (...) {
+        error ("Error while send_spec_to_server: unknown exception");
         return false;
     }
 
@@ -183,6 +201,9 @@ SocketOutput::connect_to_server (const std::string &name)
         }
     } catch (boost::system::system_error &err) {
         error ("Error while connecting: %s", err.what ());
+        return false;
+    } catch (...) {
+        error ("Error while connecting: unknown exception");
         return false;
     }
 

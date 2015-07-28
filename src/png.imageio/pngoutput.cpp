@@ -36,9 +36,9 @@
 
 #include "png_pvt.h"
 
-#include "dassert.h"
-#include "imageio.h"
-#include "strutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/strutil.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -48,30 +48,38 @@ public:
     PNGOutput ();
     virtual ~PNGOutput ();
     virtual const char * format_name (void) const { return "png"; }
-    virtual bool supports (const std::string &feature) const {
-        // Support nothing nonstandard
-        return false;
+    virtual int supports (string_view feature) const {
+        return (feature == "alpha");
     }
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        OpenMode mode=Create);
     virtual bool close ();
     virtual bool write_scanline (int y, int z, TypeDesc format,
                                  const void *data, stride_t xstride);
+    virtual bool write_tile (int x, int y, int z, TypeDesc format,
+                             const void *data, stride_t xstride,
+                             stride_t ystride, stride_t zstride);
 
 private:
     std::string m_filename;           ///< Stash the filename
     FILE *m_file;                     ///< Open image handle
     png_structp m_png;                ///< PNG read structure pointer
     png_infop m_info;                 ///< PNG image info structure pointer
+    unsigned int m_dither;
     int m_color_type;                 ///< PNG color model type
+    bool m_convert_alpha;             ///< Do we deassociate alpha?
+    float m_gamma;                    ///< Gamma to use for alpha conversion
     std::vector<unsigned char> m_scratch;
     std::vector<png_text> m_pngtext;
+    std::vector<unsigned char> m_tilebuffer;
 
     // Initialize private members to pre-opened state
     void init (void) {
         m_file = NULL;
         m_png = NULL;
         m_info = NULL;
+        m_convert_alpha = true;
+        m_gamma = 1.0;
         m_pngtext.clear ();
     }
 
@@ -147,26 +155,44 @@ PNGOutput::open (const std::string &name, const ImageSpec &userspec,
 
     png_init_io (m_png, m_file);
 
-	if (!m_spec.find_attribute("Compression")){
-		png_set_compression_level (m_png, 6 /* medium speed vs size tradeoff */);
-	}
-	else{
-		std::string zip_level=m_spec.get_string_attribute("Compression","PNG_Z_DEFAULT_COMPRESSION");
-		if(zip_level=="PNG_Z_DEFAULT"||zip_level=="PNG_Z_DEFAULT_COMPRESSION"){
-			png_set_compression_level (m_png, 6);
-		}
-		else if(zip_level=="PNG_Z_BEST_SPEED"){
-			png_set_compression_level (m_png, 1); //best speed
-		}
-		else if(zip_level=="PNG_Z_Best_COMPRESSION"){
-			png_set_compression_level (m_png, 9);
-		}
-		else if(zip_level=="PNG_Z_NO_COMPRESSION"){
-			png_set_compression_level (m_png, 0);
-		}
-	}
-	
-    PNG_pvt::write_info (m_png, m_info, m_color_type, m_spec, m_pngtext);
+    png_set_compression_level (m_png, std::max (std::min (m_spec.get_int_attribute ("png:compressionLevel", 6/* medium speed vs size tradeoff */), Z_BEST_COMPRESSION), Z_NO_COMPRESSION));
+    std::string compression = m_spec.get_string_attribute ("compression");
+    if (compression.empty ()) {
+        png_set_compression_strategy(m_png, Z_DEFAULT_STRATEGY);
+    }
+    else if (Strutil::iequals (compression, "default")) {
+        png_set_compression_strategy(m_png, Z_DEFAULT_STRATEGY);
+    }
+    else if (Strutil::iequals (compression, "filtered")) {
+        png_set_compression_strategy(m_png, Z_FILTERED);
+    }
+    else if (Strutil::iequals (compression, "huffman")) {
+        png_set_compression_strategy(m_png, Z_HUFFMAN_ONLY);
+    }
+    else if (Strutil::iequals (compression, "rle")) {
+        png_set_compression_strategy(m_png, Z_RLE);
+    }
+    else if (Strutil::iequals (compression, "fixed")) {
+        png_set_compression_strategy(m_png, Z_FIXED);
+    }
+    else {
+        png_set_compression_strategy(m_png, Z_DEFAULT_STRATEGY);
+    }
+
+    PNG_pvt::write_info (m_png, m_info, m_color_type, m_spec, m_pngtext,
+                         m_convert_alpha, m_gamma);
+
+    m_dither = (m_spec.format == TypeDesc::UINT8) ?
+                    m_spec.get_int_attribute ("oiio:dither", 0) : 0;
+
+    m_convert_alpha = m_spec.alpha_channel != -1 &&
+                      !m_spec.get_int_attribute("oiio:UnassociatedAlpha", 0);
+
+    // If user asked for tiles -- which this format doesn't support, emulate
+    // it by buffering the whole image.
+    if (m_spec.tile_width && m_spec.tile_height)
+        m_tilebuffer.resize (m_spec.image_bytes());
+
 
     return true;
 }
@@ -176,23 +202,35 @@ PNGOutput::open (const std::string &name, const ImageSpec &userspec,
 bool
 PNGOutput::close ()
 {
+    if (! m_file) {   // already closed
+        init ();
+        return true;
+    }
+
+    bool ok = true;
+    if (m_spec.tile_width) {
+        // Handle tile emulation -- output the buffered pixels
+        ASSERT (m_tilebuffer.size());
+        ok &= write_scanlines (m_spec.y, m_spec.y+m_spec.height, 0,
+                               m_spec.format, &m_tilebuffer[0]);
+        std::vector<unsigned char>().swap (m_tilebuffer);
+    }
+
     if (m_png)
         PNG_pvt::finish_image (m_png);
     PNG_pvt::destroy_write_struct (m_png, m_info);
 
-    if (m_file) {
-        fclose (m_file);
-        m_file = NULL;
-    }
+    fclose (m_file);
+    m_file = NULL;
 
     init ();      // re-initialize
-    return true;  // How can we fail?
+    return ok;
 }
 
 
 
 template <class T>
-static void 
+static void
 deassociateAlpha (T * data, int size, int channels, int alpha_channel, float gamma)
 {
     unsigned int max = std::numeric_limits<T>::max();
@@ -229,7 +267,8 @@ PNGOutput::write_scanline (int y, int z, TypeDesc format,
     y -= m_spec.y;
     m_spec.auto_stride (xstride, format, spec().nchannels);
     const void *origdata = data;
-    data = to_native_scanline (format, data, xstride, m_scratch);
+    data = to_native_scanline (format, data, xstride, m_scratch,
+                               m_dither, y, z);
     if (data == origdata) {
         m_scratch.assign ((unsigned char *)data,
                           (unsigned char *)data+m_spec.scanline_bytes());
@@ -237,16 +276,15 @@ PNGOutput::write_scanline (int y, int z, TypeDesc format,
     }
 
     // PNG specifically dictates unassociated (un-"premultiplied") alpha
-    if (m_spec.alpha_channel != -1) {
-        float gamma = m_spec.get_float_attribute ("oiio:Gamma", 1.0f);
+    if (m_convert_alpha) {
         if (m_spec.format == TypeDesc::UINT16)
             deassociateAlpha ((unsigned short *)data, m_spec.width,
                               m_spec.nchannels, m_spec.alpha_channel,
-                              gamma);
+                              m_gamma);
         else
             deassociateAlpha ((unsigned char *)data, m_spec.width,
                               m_spec.nchannels, m_spec.alpha_channel,
-                              gamma);
+                              m_gamma);
     }
 
     // PNG is always big endian
@@ -260,6 +298,19 @@ PNGOutput::write_scanline (int y, int z, TypeDesc format,
 
     return true;
 }
+
+
+
+bool
+PNGOutput::write_tile (int x, int y, int z, TypeDesc format,
+                       const void *data, stride_t xstride,
+                       stride_t ystride, stride_t zstride)
+{
+    // Emulate tiles by buffering the whole image
+    return copy_tile_to_image_buffer (x, y, z, format, data, xstride,
+                                      ystride, zstride, &m_tilebuffer[0]);
+}
+
 
 OIIO_PLUGIN_NAMESPACE_END
 

@@ -29,8 +29,8 @@
 */
 #include <cstdio>
 #include <webp/encode.h>
-#include "filesystem.h"
-#include "imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/imageio.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -45,9 +45,12 @@ class WebpOutput : public ImageOutput
     virtual const char* format_name () const { return "webp"; }
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        OpenMode mode=Create);
-    virtual bool supports (const std::string &property) const { return false; }
+    virtual int supports (string_view feature) const;
     virtual bool write_scanline (int y, int z, TypeDesc format,
                                  const void *data, stride_t xstride);
+    virtual bool write_tile (int x, int y, int z, TypeDesc format,
+                             const void *data, stride_t xstride,
+                             stride_t ystride, stride_t zstride);
     virtual bool close();
 
  private:
@@ -56,6 +59,7 @@ class WebpOutput : public ImageOutput
     std::string m_filename;
     FILE *m_file;
     int m_scanline_size;
+    unsigned int m_dither;
     std::vector<uint8_t> m_uncompressed_image;
 
     void init()
@@ -64,6 +68,15 @@ class WebpOutput : public ImageOutput
         m_file = NULL;
     }
 };
+
+
+
+int
+WebpOutput::supports (string_view feature) const
+{
+    return (feature == "alpha");
+}
+
 
 
 static int WebpImageWriter(const uint8_t* img_data, size_t data_size,
@@ -92,6 +105,12 @@ WebpOutput::open (const std::string &name, const ImageSpec &spec,
     // saving 'name' and 'spec' for later use
     m_filename = name;
     m_spec = spec;
+
+    if (m_spec.nchannels != 3 && m_spec.nchannels != 4) {
+        error ("%s does not support %d-channel images\n",
+               format_name(), m_spec.nchannels);
+        return false;
+    }
 
     m_file = Filesystem::fopen (m_filename, "wb");
     if (!m_file) {
@@ -130,6 +149,7 @@ WebpOutput::open (const std::string &name, const ImageSpec &spec,
     
     // forcing UINT8 format
     m_spec.set_format (TypeDesc::UINT8);
+    m_dither = m_spec.get_int_attribute ("oiio:dither", 0);
 
     m_scanline_size = m_spec.width * m_spec.nchannels;
     const int image_buffer = m_spec.height * m_scanline_size;
@@ -149,7 +169,8 @@ WebpOutput::write_scanline (int y, int z, TypeDesc format,
         return false;
     }
     std::vector<uint8_t> scratch;
-    data = to_native_scanline (format, data, xstride, scratch);
+    data = to_native_scanline (format, data, xstride, scratch,
+                               m_dither, y, z);
     memcpy(&m_uncompressed_image[y*m_scanline_size], data, m_scanline_size);
 
     if (y == m_spec.height - 1)
@@ -173,17 +194,40 @@ WebpOutput::write_scanline (int y, int z, TypeDesc format,
 }
 
 
+
+bool
+WebpOutput::write_tile (int x, int y, int z, TypeDesc format,
+                        const void *data, stride_t xstride,
+                        stride_t ystride, stride_t zstride)
+{
+    // Emulate tiles by buffering the whole image
+    return copy_tile_to_image_buffer (x, y, z, format, data, xstride,
+                                      ystride, zstride, &m_uncompressed_image[0]);
+}
+
+
+
 bool
 WebpOutput::close()
 {
-    if (m_file)
-    {
-        WebPPictureFree(&m_webp_picture);
-        fclose(m_file);
-        m_file = NULL;
+    if (! m_file)
+        return true;   // already closed
+
+    bool ok = true;
+    if (m_spec.tile_width) {
+        // We've been emulating tiles; now dump as scanlines.
+        ASSERT (m_uncompressed_image.size());
+        ok &= write_scanlines (m_spec.y, m_spec.y+m_spec.height, 0,
+                               m_spec.format, &m_uncompressed_image[0]);
+        std::vector<uint8_t>().swap (m_uncompressed_image);
     }
+
+    WebPPictureFree(&m_webp_picture);
+    fclose(m_file);
+    m_file = NULL;
     return true;
 }
+
 
 } // namespace webp_pvt
 

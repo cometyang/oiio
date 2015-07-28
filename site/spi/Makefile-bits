@@ -1,5 +1,7 @@
 # SPI-specific settings
+ifneq (${VERBOSE},)
 $(info Including spi/Makefile-bits)
+endif
 
 use_spcomp2_bits := 0
 # Is the string literal 'spcomp2' in the command goals?
@@ -20,3 +22,4 @@ else
   include ${working_dir}/site/spi/Makefile-bits-arnold
 endif
 
+MY_CMAKE_FLAGS += -DSPI_TESTS=1

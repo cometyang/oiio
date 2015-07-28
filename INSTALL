@@ -22,15 +22,23 @@ Building OpenImageIO on Linux or OS X
 -------------------------------------
 
 The following dependencies must be installed to build the core of
-OpenImageIO: Boost, libjpeg, libtiff, libpng and OpenEXR.  These can be installed
-using the standard package managers on your system.  Optionally, 
-to build the image viewing tools, you will need Qt, OpenGL, and GLEW.
+OpenImageIO: Boost, libjpeg, libtiff, libpng and OpenEXR.  These can be
+installed using the standard package managers on your system.
+Optionally, to build the image viewing tools, you will need Qt, OpenGL,
+and GLEW.
 
-On OS X, these dependencies can be installed using MacPorts or 
-Homebrew.  After installation of either of these package installers,
-use the "port" or "brew" commands (respectively) to install the
-dependencies (e.g. "port install qt4-mac" or "brew update; 
-brew doctor; brew install qt") before invoking make as described below.
+On OS X, these dependencies can be installed using Fink, MacPorts or
+Homebrew.  After installation of any of these package installers, use
+the "fink", "port" or "brew" commands (respectively) to install the
+dependencies (e.g. "fink install libpng16", "port install qt4-mac" or "brew
+update; brew doctor; brew install qt") before invoking make as described
+below.
+
+On OS X, Fink can also be used to directly compile and install the OpenImageIO
+tools directly with the command "fink install openimageio-tools".  On OS X
+releases where Fink has a binary distribution (10.8, 10.9, and 10.10 as
+of 2015), the command "apt-get install openimageio-tools" will fetch
+prebuilt binaries.
 
 Dependent libraries can be installed in either the system default
 locations or in custom directories.  Libraries installed in custom
@@ -68,18 +76,35 @@ Make targets you should know about:
 Additionally, a few helpful modifiers alter some build-time options:
 
   make VERBOSE=1 ...          Show all compilation commands
+  make STOP_ON_WARNING=0      Do not stop building if compiler warns
   make EMBEDPLUGINS=0 ...     Don't compile the plugins into libOpenImageIO
   make USE_OPENGL=0 ...       Skip anything that needs OpenGL
   make USE_QT=0 ...           Skip anything that needs Qt
   make MYCC=xx MYCXX=yy ...   Use custom compilers
   make FORCE_OPENGL_1=1 ...   Force iv to use OpenGL's fixed pipeline
-  make USE_TBB=0 ...          Don't use TBB
-  make USE_PYTHON=1 ...       Build the Python binding
+  make USE_PYTHON=0 ...       Don't build the Python binding
   make BUILDSTATIC=1 ...      Build static library instead of shared
   make LINKSTATIC=1 ...       Link with static external libraries when possible
   make SOVERSION=nn ...       Include the specifed major version number in the
                                 shared object metadata
   make NAMESPACE=name         Wrap everything in another namespace
+
+The command 'make help' will list all possible options.
+
+You can also ignore the top level Makefile wrapper, and instead use
+CMake directly:
+
+  mkdir build
+  cd build
+  cmake ..
+
+If the compile stops because of warnings, try again with 
+  make nuke
+  make STOP_ON_WARNING=0
+or, if you are using CMake directly,
+  cd build
+  cmake -DSTOP_ON_WARNING=0 ..
+
 
 
 

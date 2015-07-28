@@ -39,11 +39,11 @@
 #include <OpenEXR/ImathColor.h>
 using Imath::Color3f;
 
-#include "fmath.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "imagebufalgo_util.h"
-#include "dassert.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/imagebufalgo_util.h"
+#include "OpenImageIO/dassert.h"
 
 
 template<class T>
@@ -266,22 +266,22 @@ ImageBufAlgo::compare_Yee (const ImageBuf &img0, const ImageBuf &img1,
     // ending up with a 0-origin image.  End up with an LAB image in
     // aLAB, and a luminance image in aLum.
     ImageSpec spec (roi.width(), roi.height(), 3 /*chans*/, TypeDesc::FLOAT);
-    ImageBuf aLAB ("aLum", spec);
+    ImageBuf aLAB (spec);
     ImageBufAlgo::paste (aLAB, 0, 0, 0, 0, img0, roi, nthreads);
     AdobeRGBToXYZ (aLAB, ROI::All(), nthreads);  // contains XYZ now
     ImageBuf aLum;
     int channelorder[] = { 1 };  // channel to copy
     ImageBufAlgo::channels (aLum, aLAB, 1, channelorder);
-    ImageBufAlgo::mul (aLum, luminance, ROI::All(), nthreads);
+    ImageBufAlgo::mul (aLum, aLum, luminance, ROI::All(), nthreads);
     XYZToLAB (aLAB, ROI::All(), nthreads);  // now it's LAB
 
     // Same thing for img1/bLAB/bLum
-    ImageBuf bLAB ("bLum", spec);
+    ImageBuf bLAB (spec);
     ImageBufAlgo::paste (bLAB, 0, 0, 0, 0, img1, roi, nthreads);
     AdobeRGBToXYZ (bLAB, ROI::All(), nthreads);  // contains XYZ now
     ImageBuf bLum;
     ImageBufAlgo::channels (bLum, bLAB, 1, channelorder);
-    ImageBufAlgo::mul (bLum, luminance, ROI::All(), nthreads);
+    ImageBufAlgo::mul (bLum, bLum, luminance, ROI::All(), nthreads);
     XYZToLAB (bLAB, ROI::All(), nthreads);  // now it's LAB
 
     // Construct Gaussian pyramids (not really pyramids, because they all
@@ -371,16 +371,6 @@ ImageBufAlgo::compare_Yee (const ImageBuf &img0, const ImageBuf &img1,
     }
 
     return result.nfail;
-}
-
-
-
-int
-ImageBufAlgo::compare_Yee (const ImageBuf &A, const ImageBuf &B,
-                           float luminance, float fov)
-{
-    CompareResults result;
-    return compare_Yee (A, B, result, luminance, fov);
 }
 
 

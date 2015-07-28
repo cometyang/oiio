@@ -50,16 +50,10 @@ rather than having an ever-growing list of parameters, most of which
 will never vary from their defaults.  Here is a brief description of
 the data members of a \TextureOpt structure:
 
-\apiitem{int nchannels\\
-int firstchannel}
-The number of color channels to look up from the texture --- for
-example, 1 (single channel), or 3 (for an RGB triple) --- and the number
-of channels to look up.  The defaults are firstchannel = 0, nchannels =
-1.
-
-Examples: To retrieve the first three channels (typically RGB), you
-should have nchannels = 3, firstchannel = 0.  To retrieve just the blue
-channel, you should have nchannels = 1, firstchannel = 2.
+\apiitem{int firstchannel}
+The beginning channel for the lookup.  For example, to retrieve just the blue
+channel, you should have {\cf firstchannel} = 2 while passing {\cf nchannels} = 1
+to the appropriate texture function.
 \apiend
 
 \apiitem{int subimage \\
@@ -140,14 +134,6 @@ a missing or broken texture will be treated as an error and
 Note: When not NULL, the data must point to \emph{nchannels} contiguous floats.
 \apiend
 
-\apiitem{float *dresultds, *dresultdt}
-If not NULL (the default), these specify locations in which to store
-the \emph{derivatives} of the texture lookup, i.e., the change of the
-filtered texture per unit of $s$ and $t$, respectively.  Each must point
-to {\cf nchannels} contiguous floats.  If either is NULL, the derivative
-computations will not be performed.
-\apiend
-
 \apiitem{float bias}
 For shadow map lookups only, this gives the ``shadow bias'' amount.
 \apiend
@@ -157,11 +143,9 @@ For shadow map lookups only, the number of samples to use for the lookup.
 \apiend
 
 \apiitem{Wrap rwrap \\
-float rblur, rwidth \\
-float *dresultdr}
-Specifies wrap, blur, width, and derivative results for the third
-component of 3D volume texture lookups.  These are not used for 2D
-texture lookups.
+float rblur, rwidth}
+Specifies wrap, blur, and width for the third component of 3D volume texture
+lookups.  These are not used for 2D texture lookups.
 \apiend
 
 \subsection{\TextureOptions}
@@ -173,16 +157,10 @@ rather than having an ever-growing list of parameters, most of which
 will never vary from their defaults.  Here is a brief description of
 the data members of a \TextureOptions structure:
 
-\apiitem{int nchannels\\
-int firstchannel}
-The number of color channels to look up from the texture --- for
-example, 1 (single channel), or 3 (for an RGB triple) --- and the number
-of channels to look up.  The defaults are firstchannel = 0, nchannels =
-1.
-
-Examples: To retrieve the first three channels (typically RGB), you
-should have nchannels = 3, firstchannel = 0.  To retrieve just the blue
-channel, you should have nchannels = 1, firstchannel = 2.
+\apiitem{int firstchannel}
+The beginning channel for the lookup.  For example, to retrieve just the blue
+channel, you should have {\cf firstchannel} = 2 while passing {\cf nchannels} = 1
+to the appropriate texture function.
 \apiend
 
 \apiitem{int subimage}
@@ -261,14 +239,6 @@ Although this is a {\cf VaryingRef<float>}, the data must point to
 be set to {\cf nchannels*sizeof(float)}, not {\cf sizeof(float)}.
 \apiend
 
-\apiitem{float *dresultds, *dresultdt}
-If not NULL (the default), these specify locations in which to store
-the \emph{derivatives} of the texture lookup, i.e., the change of the
-filtered texture per unit of $s$ and $t$, respectively.  Each must point
-to {\cf nchannels} contiguous floats.  If either is NULL, the derivative
-computations will not be performed.
-\apiend
-
 \apiitem{VaryingRef<float> bias}
 For shadow map lookups only, this gives the ``shadow bias'' amount.
 \apiend
@@ -278,11 +248,9 @@ For shadow map lookups only, the number of samples to use for each lookup.
 \apiend
 
 \apiitem{Wrap rwrap \\
-VaryingRef<float> rblur, rwidth \\
-float *dresultdr}
-Specifies wrap, blur, width, and derivative results for the third
-component of 3D volume texture lookups.  These are not used for 2D
-texture lookups.
+VaryingRef<float> rblur, rwidth}
+Specifies wrap, blur, and width for the third component of 3D volume texture
+lookups.  These are not used for 2D texture lookups.
 \apiend
 
 \subsection{{\cf VaryingRef}: encapsulate uniform and varying}
@@ -390,16 +358,20 @@ completely unique \ImageCache will be created that is private to this
 particular \TextureSystem.
 \apiend
 
-\apiitem{static void TextureSystem::{\ce destroy} (TextureSystem *x)}
+\apiitem{static void TextureSystem::{\ce destroy} (TextureSystem *x, \\
+\bigspc\bigspc bool teardown_imagecache=false)}
 Destroys an allocated \TextureSystem, including freeing all system
-resources that it holds.
+resources that it holds (such as its underlying \ImageCache).
 
 This is necessary to ensure that the memory is freed in a way that
 matches the way it was allocated within the library.  Note that simply
 using {\cf delete} on the pointer will not always work (at least,
 not on some platforms in which a DSO/DLL can end up using a different
 allocator than the main program).
-\apiend
+
+If {\cf teardown_imagecache} is {\cf true}, and the \TextureSystem's
+underlying \ImageCache is the \emph{shared} one, then that \ImageCache will
+be thoroughly destroyed, not merely releasing the reference. \apiend
 
 \subsection{Setting options and limits for the texture system}
 \label{sec:texturesys:api:options}
@@ -408,7 +380,7 @@ The following member functions of \TextureSystem allow you to set
 (and in some cases retrieve) options that control the overall
 behavior of the texture system:
 
-\apiitem{bool {\ce attribute} (const std::string \&name, TypeDesc type,
+\apiitem{bool {\ce attribute} (string_view name, TypeDesc type,
   const void *val)}
 \indexapi{attribute}
 
@@ -447,11 +419,10 @@ The complete list of attributes can be found at the end of this section.
 
 \apiend
 
-\apiitem{bool {\ce attribute} (const std::string \&name, int val) \\
-bool {\ce attribute} (const std::string \&name, float val) \\
-bool {\ce attribute} (const std::string \&name, double val) \\
-bool {\ce attribute} (const std::string \&name, const char *val) \\
-bool {\ce attribute} (const std::string \&name, const std::string \& val)}
+\apiitem{bool {\ce attribute} (string_view name, int val) \\
+bool {\ce attribute} (string_view name, float val) \\
+bool {\ce attribute} (string_view name, double val) \\
+bool {\ce attribute} (string_view name, string_view val)}
 Specialized versions of {\cf attribute()} in which the data type is
 implied by the type of the argument.
 
@@ -466,7 +437,7 @@ general (pointer) form of {\cf attribute()}:
 \apiend
 
 
-\apiitem{bool {\ce getattribute} (const std::string \&name, TypeDesc type,
+\apiitem{bool {\ce getattribute} (string_view name, TypeDesc type,
   void *val)}
 \indexapi{getattribute}
 
@@ -506,11 +477,11 @@ The complete list of attributes can be found at the end of this section.
 
 \apiend
 
-\apiitem{bool {\ce getattribute} (const std::string \&name, int \&val) \\
-bool {\ce getattribute} (const std::string \&name, float \&val) \\
-bool {\ce getattribute} (const std::string \&name, double \&val) \\
-bool {\ce getattribute} (const std::string \&name, char **val) \\
-bool {\ce getattribute} (const std::string \&name, std::string \& val)}
+\apiitem{bool {\ce getattribute} (string_view name, int \&val) \\
+bool {\ce getattribute} (string_view name, float \&val) \\
+bool {\ce getattribute} (string_view name, double \&val) \\
+bool {\ce getattribute} (string_view name, char **val) \\
+bool {\ce getattribute} (string_view name, std::string \& val)}
 Specialized versions of {\cf getattribute()} in which the data type is
 implied by the type of the argument.
 
@@ -600,23 +571,54 @@ settings of named options.  For example,
 \subsection{Opaque data for performance lookups}
 \label{sec:texturesys:api:opaque}
 
-\apiitem{Perthread * {\ce get_perthread_info} ()}
+\apiitem{Perthread * {\ce get_perthread_info} (Perthread *thread_info=NULL) \\
+Perthread * {\ce create_perthread_info} () \\
+void {\ce destroy_perthread_info} (Perthread *thread_info)}
 \indexapi{get_perthread_info}
+\indexapi{create_perthread_info} \indexapi{destroy_perthread_info}
+\NEW % 1.6
 
-Retrieves an opaque handle for per-thread info, to be used for
-{\cf get_texture_handle()} and the texture routines that take handles
-directly.
+The \TextureSystem implementation needs to maintain certain per-thread
+state, and some \TextureSystem methods take an opaque {\cf Perthread} pointer
+to this record. There are three options for how to deal with it:
+
+1. Don't worry about it at all: don't use the methods that want {\cf
+Perthread} pointers, or always pass {\cf NULL} for any {\cf Perthread*}
+arguments, and \TextureSystem will do thread-specific-pointer retrieval as
+necessary (though at some small cost).
+
+2. If your app already stores per-thread information of its own, you may
+call {\cf get_perthread_info(NULL)} to retrieve it for that thread, and then
+pass it into the functions that allow it (thus sparing them the need and
+expense of retrieving the thread-specific pointer). However, it is crucial
+that this pointer not be shared between multiple threads. In this case,
+the \TextureSystem manages the storage, which will automatically be released
+when the thread terminates.
+
+3. If your app also wants to manage the storage of the {\cf Perthread},
+it can explicitly create one with {\cf create_perthread_info}, pass it around,
+and eventually be responsible for destroying it with {\cf destroy_perthread_info}.
+When managing the storage, the app may reuse the {\cf Perthread} for another
+thread after the first is terminated, but still may not use the same
+{\cf Perthread} for two threads running concurrently.
 \apiend
+
 
 \apiitem{TextureHandle * {\ce get_texture_handle} (ustring filename,\\
 \bigspc\bigspc\bigspc  Perthread *thread_info=NULL)}
 \indexapi{get_texture_handle}
-
-Retrieve an opaque handle for fast texture lookups.  The opaque
+Retrieve an opaque handle for fast texture lookups.  The optional opaque
 pointer {\cf thread_info} is thread-specific information returned by
 {\cf get_perthread_info()}.  Return {\cf NULL} if something has gone
 horribly wrong.
+\apiend
 
+\apiitem{bool {\ce good} (TextureHandle *texture_handle)}
+\indexapi{good}
+\NEW % 1.6
+Return true if the texture handle (previously returned by
+{\cf get_texture_handle()}) is a valid image that can be subsequently read
+or sampled.
 \apiend
 
 
@@ -625,14 +627,17 @@ horribly wrong.
 \label{sec:texturesys:api:texture}
 
 \apiitem{bool {\ce texture} (ustring filename, TextureOpt \&options,\\
-\bigspc                   float s, float t, float dsdx, float dtdx,\\
-\bigspc                   float dsdy, float dtdy, float *result)}
+\bigspc\spc                   float s, float t, float dsdx, float dtdx,\\
+\bigspc\spc                   float dsdy, float dtdy, int nchannels, float *result),\\
+\bigspc\spc                   float *dresultds=NULL, float *dresultdt=NULL)}
 \indexapi{texture}
 
 Perform a filtered 2D texture lookup on a position centered at 2D
 coordinates ({\cf s}, {\cf t}) from the texture identified by
-{\cf filename}, and using relevant texture {\cf options}.  The filtered
-results will be stored in {\cf result[]}.
+{\cf filename}, and using relevant texture {\cf options}.  The
+{\cf nchannels} parameter determines the number of channels to retrieve
+(e.g., 1 for a single value, 3 for an RGB triple, etc.).
+The filtered results will be stored in {\cf result[0..nchannels-1]}.
 
 We assume that this lookup will be part of an image that has pixel
 coordinates {\cf x} and {\cf y}.  By knowing how {\cf s} and {\cf t}
@@ -644,16 +649,17 @@ in {\cf s} and {\cf t} per unit of {\cf x}, and {\cf dsdy} and {\cf
   y}.  If it is impossible to know the derivatives, you may pass 0 for
 them, but in that case you will not receive an antialiased texture lookup.
 
+If the {\cf dresultds} and {\cf dresultdt} parameters are not {\cf NULL}
+(the default), these specify locations in which to store the
+\emph{derivatives} of the texture lookup, i.e., the change of the filtered
+texture per unit of $s$ and $t$, respectively.  Each must point to at least
+{\cf nchannels} contiguous floats.  If they are {\cf NULL}, the derivative
+computations will not be performed.
+
 Fields within {\cf options} that are honored for 2D texture lookups
 include the following:
 
 \vspace{-12pt}
-\apiitem{int nchannels}
-\vspace{10pt}
-The number of color channels to look up from the texture.
-\apiend
-
-\vspace{-24pt}
 \apiitem{int firstchannel}
 \vspace{10pt}
 The index of the first channel to look up from the texture.
@@ -707,13 +713,6 @@ If not NULL, specifies the color that will be returned for missing or
 broken textures (rather than being an error).
 \apiend
 
-\vspace{-24pt}
-\apiitem{float *dresultds, *dresultdt}
-\vspace{10pt}
-If not NULL, specifies locations in which to store the $s$ and $t$
-derivatives of the filtered texture lookup.
-\apiend
-
 This function returns {\cf true} upon success, or {\cf false} if the
 file was not found or could not be opened by any available ImageIO
 plugin.
@@ -722,9 +721,9 @@ plugin.
 
 \apiitem{bool {\ce texture} (TextureHandle *texture_handle,
                           Perthread *thread_info, \\
-\bigspc                   TextureOpt \&options,\\
-\bigspc                   float s, float t, float dsdx, float dtdx,\\
-\bigspc                   float dsdy, float dtdy, float *result)}
+\bigspc                   TextureOpt \&options, float s, float t, float dsdx, float dtdx,\\
+\bigspc                   float dsdy, float dtdy, int nchannels, float *result,\\
+\bigspc                   float *dresultds=NULL, float *dresultdt=NULL)}
 A slightly faster {\cf texture} call for applications that are willing
 to do the extra housekeeping of knowing the handle of the texture they
 are accessing and the per-thread info for the curent thread.  These
@@ -737,7 +736,18 @@ may be retrieved by the {\cf get_texture_handle()} and
 \bigspc                   VaryingRef<float> s, VaryingRef<float> t,\\
 \bigspc                   VaryingRef<float> dsdx, VaryingRef<float> dtdx,\\
 \bigspc                   VaryingRef<float> dsdy, VaryingRef<float> dtdy,\\
-\bigspc                   float *result)}
+\bigspc                   int nchannels, float *result,\\
+\bigspc                   float *dresultds=NULL, float *dresultdt=NULL) \\[2ex]
+bool {\ce texture} (TextureHandle *texture_handle,
+                          Perthread *thread_info, \\
+\bigspc                   TextureOptions \&options,\\
+\bigspc                   Runflag *runflags, int beginactive, int endactive,\\
+\bigspc                   VaryingRef<float> s, VaryingRef<float> t,\\
+\bigspc                   VaryingRef<float> dsdx, VaryingRef<float> dtdx,\\
+\bigspc                   VaryingRef<float> dsdy, VaryingRef<float> dtdy,\\
+\bigspc                   int nchannels, float *result,\\
+\bigspc                   float *dresultds=NULL, float *dresultdt=NULL) \\
+}
 
 Perform filtered 2D texture lookups on a collection of positions all at
 once, which may be much more efficient than repeatedly calling the
@@ -750,13 +760,14 @@ Texture will be computed at indices {\cf beginactive} through
 {\cf endactive} (exclusive of the end), but only at indices where {\cf runflags[i]}
 is nonzero.  Results will be stored at corresponding positions of
 {\cf result}, that is, 
-{\cf result[i*n ... (i+1)*n-1]} where $n$ is the number of channels
-requested by {\cf options.nchannels}.
+{\cf result[i*nchannels ... (i+1)*nchannels-1]} (and similarly for
+{\cf dresultds} and {\cf dresultdt}, if they are not {\cf NULL}).
 
 This function returns {\cf true} upon success, or {\cf false} if the
 file was not found or could not be opened by any available ImageIO
 plugin.
 \apiend
+
 
 %\newpage
 \subsection{Volume Texture Lookups}
@@ -765,13 +776,15 @@ plugin.
 \apiitem{bool {\ce texture3d} (ustring filename, TextureOpt \&options,\\
 \bigspc\spc                    const Imath::V3f \&P, const Imath::V3f \&dPdx,\\
 \bigspc\spc                    const Imath::V3f \&dPdy, const Imath::V3f \&dPdz,\\
-\bigspc\spc                    float *result)}
+\bigspc\spc                    int nchannels, float *result,\\
+\bigspc\spc                   float *dresultds=NULL, float *dresultdt=NULL,\\
+\bigspc\spc                   float *dresultdr=NULL)}
 \indexapi{texture3d}
 
 Perform a filtered 3D volumetric texture lookup on a position centered at
 3D position {\cf P} from the texture identified by
 {\cf filename}, and using relevant texture {\cf options}.  The filtered
-results will be stored in {\cf result[]}.
+results will be stored in {\cf result[0..nchannels-1]}.
 
 We assume that this lookup will be part of an image that has pixel
 coordinates {\cf x} and {\cf y} and depth {\cf z}.  
@@ -789,16 +802,17 @@ system (usually \qkw{world} space) and will be automatically transformed
 into volume local coordinates, if such a transormation is specified in
 the volume file itself.
 
+If the {\cf dresultds}, {\cf dresultdt}, and  {\cf dresultdr} parameters are
+not {\cf NULL} (the default), these specify locations in which to store the
+\emph{derivatives} of the texture lookup, i.e., the change of the filtered
+texture per unit of $s$, $t$ and $r$, respectively.  Each must point to at least
+{\cf nchannels} contiguous floats.  If they are {\cf NULL}, the derivative
+computations will not be performed.
+
 Fields within {\cf options} that are honored for 3D texture lookups
 include the following:
 
 \vspace{-12pt}
-\apiitem{int nchannels}
-\vspace{10pt}
-The number of color channels to look up from the texture.
-\apiend
-
-\vspace{-24pt}
 \apiitem{int firstchannel}
 \vspace{10pt}
 The index of the first channel to look up from the texture.
@@ -851,13 +865,6 @@ A time value to use if the volume texture specifies a time-varying
 local transformation (default: 0).
 \apiend
 
-\vspace{-24pt}
-\apiitem{float *dresultds, *dresultdt, *dresultdr}
-\vspace{10pt}
-If not NULL, specifies locations in which to store the $s$, $t$, and $r$
-derivatives of the filtered texture lookup.
-\apiend
-
 This function returns {\cf true} upon success, or {\cf false} if the
 file was not found or could not be opened by any available ImageIO
 plugin.
@@ -866,12 +873,10 @@ plugin.
 
 \apiitem{bool {\ce texture3d} (TextureHandle *texture_handle,
                           Perthread *thread_info, \\
-\bigspc                   TextureOpt \&opt,\\
-\bigspc                          const Imath::V3f \&P,\\
-\bigspc                          const Imath::V3f \&dPdx,\\
-\bigspc                          const Imath::V3f \&dPdy,\\
-\bigspc                          const Imath::V3f \&dPdz,\\
-\bigspc                          float *result)}
+\bigspc\spc                   TextureOpt \&opt, const Imath::V3f \&P, const Imath::V3f \&dPdx,\\
+\bigspc\spc                          const Imath::V3f \&dPdy, const Imath::V3f \&dPdz,\\
+\bigspc\spc                          int nchannels, float *result, float *dresultds=NULL,\\
+\bigspc\spc                          float *dresultdt=NULL, float *dresultdr=NULL)}
 A slightly faster {\cf texture3d} call for applications that are willing
 to do the extra housekeeping of knowing the handle of the texture they
 are accessing and the per-thread info for the curent thread.  These
@@ -881,11 +886,18 @@ may be retrieved by the {\cf get_texture_handle()} and
 
 \apiitem{bool {\ce texture3d} (ustring filename, TextureOptions \&options,\\
 \bigspc                          Runflag *runflags, int beginactive, int endactive,\\
-\bigspc                          VaryingRef<Imath::V3f> P,\\
-\bigspc                          VaryingRef<Imath::V3f> dPdx,\\
-\bigspc                          VaryingRef<Imath::V3f> dPdy,\\
-\bigspc                          VaryingRef<Imath::V3f> dPdz,\\
-\bigspc                          float *result)}
+\bigspc                          VaryingRef<Imath::V3f> P, VaryingRef<Imath::V3f> dPdx,\\
+\bigspc                          VaryingRef<Imath::V3f> dPdy, VaryingRef<Imath::V3f> dPdz,\\
+\bigspc                          int nchannels, float *result, float *dresultds=NULL,\\
+\bigspc                          float *dresultdt=NULL,float *dresultdr=NULL)\\[2ex]
+bool {\ce texture3d} (TextureHandle *texture_handle,
+                          Perthread *thread_info, \\
+\bigspc                   TextureOptions \&options,\\
+\bigspc                          Runflag *runflags, int beginactive, int endactive,\\
+\bigspc                          VaryingRef<Imath::V3f> P, VaryingRef<Imath::V3f> dPdx,\\
+\bigspc                          VaryingRef<Imath::V3f> dPdy, VaryingRef<Imath::V3f> dPdz,\\
+\bigspc                          int nchannels, float *result, float *dresultds=NULL,\\
+\bigspc                          float *dresultdt=NULL, float *dresultdr=NULL)}
 
 Perform filtered 3D volumetric texture lookups on a collection of positions all at
 once, which may be much more efficient than repeatedly calling the
@@ -911,7 +923,8 @@ plugin.
 
 \apiitem{bool {\ce shadow} (ustring filename, TextureOpt \&opt,\\
 \bigspc                         const Imath::V3f \&P, const Imath::V3f \&dPdx,\\
-\bigspc                         const Imath::V3f \&dPdy, float *result)}
+\bigspc                         const Imath::V3f \&dPdy, int nchannels, float *result,\\
+\bigspc                         float *dresultds=NULL, float *dresultdt=NULL)}
 \indexapi{shadow}
 
 Perform a shadow map lookup on a position centered at 3D
@@ -968,11 +981,10 @@ plugin.
 
 \apiitem{bool {\ce shadow} (TextureHandle *texture_handle,
                           Perthread *thread_info, \\
-\bigspc                   TextureOpt \&opt,\\
-\bigspc                         const Imath::V3f \&P,\\
-\bigspc                         const Imath::V3f \&dPdx,\\
-\bigspc                         const Imath::V3f \&dPdy,\\
-\bigspc                         float *result)}
+\bigspc                   TextureOpt \&opt, const Imath::V3f \&P,\\
+\bigspc                         const Imath::V3f \&dPdx, const Imath::V3f \&dPdy,\\
+\bigspc                         int nchannels, float *result,\\
+\bigspc                         float *dresultds=NULL, float *dresultdt=NULL)}
 A slightly faster {\cf shadow} call for applications that are willing
 to do the extra housekeeping of knowing the handle of the texture they
 are accessing and the per-thread info for the curent thread.  These
@@ -982,10 +994,15 @@ may be retrieved by the {\cf get_texture_handle()} and
 
 \apiitem{bool {\ce shadow} (ustring filename, TextureOptions \&options,\\
 \bigspc                         Runflag *runflags, int beginactive, int endactive,\\
-\bigspc                         VaryingRef<Imath::V3f> P,\\
-\bigspc                         VaryingRef<Imath::V3f> dPdx,\\
-\bigspc                         VaryingRef<Imath::V3f> dPdy,\\
-\bigspc                         float *result)}
+\bigspc                         VaryingRef<Imath::V3f> P, VaryingRef<Imath::V3f> dPdx,\\
+\bigspc                         VaryingRef<Imath::V3f> dPdy, int nchannels, float *result,\\
+\bigspc                         float *dresultds=NULL, float *dresultdt=NULL)\\[2ex]
+bool {\ce shadow} (TextureHandle *texture_handle,  Perthread *thread_info, \\
+\bigspc                         TextureOptions \&options,\\
+\bigspc                         Runflag *runflags, int beginactive, int endactive,\\
+\bigspc                         VaryingRef<Imath::V3f> P, VaryingRef<Imath::V3f> dPdx,\\
+\bigspc                         VaryingRef<Imath::V3f> dPdy, int nchannels, float *result,\\
+\bigspc                         float *dresultds=NULL, float *dresultdt=NULL)}
 
 Perform filtered shadow map lookups on a collection of positions all at
 once, which may be much more efficient than repeatedly calling the
@@ -1010,8 +1027,9 @@ plugin.
 \label{sec:texturesys:api:environment}
 
 \apiitem{bool {\ce environment} (ustring filename, TextureOpt \&options,\\
-\bigspc                              const Imath::V3f \&R, const Imath::V3f \&dRdx,\\
-\bigspc                              const Imath::V3f \&dRdy, float *result)}
+\bigspc\spc                      const Imath::V3f \&R, const Imath::V3f \&dRdx,\\
+\bigspc\spc                      const Imath::V3f \&dRdy, int nchannels, float *result,\\
+\bigspc\spc                     float *dresultds=NULL, float *dresultdt=NULL)}
 \indexapi{environment}
 
 Perform a filtered directional environment map lookup in the direction
@@ -1032,12 +1050,6 @@ Fields within {\cf options} that are honored for 3D texture lookups
 include the following:
 
 \vspace{-12pt}
-\apiitem{int nchannels}
-\vspace{10pt}
-The number of color channels to look up from the texture.
-\apiend
-
-\vspace{-24pt}
 \apiitem{int firstchannel}
 \vspace{10pt}
 The index of the first channel to look up from the texture.
@@ -1075,11 +1087,10 @@ plugin.
 
 \apiitem{bool {\ce environment} (TextureHandle *texture_handle,
                           Perthread *thread_info, \\
-\bigspc                   TextureOpt \&opt,\\
-\bigspc                              const Imath::V3f \&R,\\
-\bigspc                              const Imath::V3f \&dRdx,\\
-\bigspc                              const Imath::V3f \&dRdy,\\
-\bigspc                              float *result)}
+\bigspc\spc               TextureOpt \&opt, const Imath::V3f \&R,\\
+\bigspc\spc               const Imath::V3f \&dRdx, onst Imath::V3f \&dRdy,\\
+\bigspc\spc               int nchannels, float *result,\\
+\bigspc\spc               float *dresultds=NULL, float *dresultdt=NULL)}
 A slightly faster {\cf environment} call for applications that are willing
 to do the extra housekeeping of knowing the handle of the texture they
 are accessing and the per-thread info for the curent thread.  These
@@ -1088,11 +1099,17 @@ may be retrieved by the {\cf get_texture_handle()} and
 \apiend
 
 \apiitem{bool {\ce environment} (ustring filename, TextureOptions \&options,\\
-\bigspc                              Runflag *runflags, int beginactive, int endactive,\\
-\bigspc                              VaryingRef<Imath::V3f> R,\\
-\bigspc                              VaryingRef<Imath::V3f> dRdx,\\
-\bigspc                              VaryingRef<Imath::V3f> dRdy,\\
-\bigspc                              float *result)}
+\bigspc\spc                              Runflag *runflags, int beginactive, int endactive,\\
+\bigspc\spc                              VaryingRef<Imath::V3f> R, VaryingRef<Imath::V3f> dRdx,\\
+\bigspc\spc                              VaryingRef<Imath::V3f> dRdy, int nchannels, float *result,\\
+\bigspc\spc                         float *dresultds=NULL, float *dresultdt=NULL)\\[2ex]
+bool {\ce environment} (TextureHandle *texture_handle,
+                          Perthread *thread_info, \\
+\bigspc\spc                   TextureOptions \&options,\\
+\bigspc\spc                              Runflag *runflags, int beginactive, int endactive,\\
+\bigspc\spc                              VaryingRef<Imath::V3f> R, VaryingRef<Imath::V3f> dRdx,\\
+\bigspc\spc                              VaryingRef<Imath::V3f> dRdy, int nchannels, float *result,\\
+\bigspc\spc                         float *dresultds=NULL, float *dresultdt=NULL)}
 
 Perform filtered directional environment map lookups on a collection of
 directions all at once, which may be much more efficient than repeatedly
@@ -1118,27 +1135,37 @@ plugin.
 \label{sec:texturesys:api:getimagespec}
 
 \apiitem{bool {\ce get_texture_info} (ustring filename, int subimage, \\
+\bigspc\spc\spc ustring dataname, TypeDesc datatype, void *data) \\
+bool {\ce get_texture_info} (TextureHandle *texture_handle, \\
+\bigspc\spc\spc Perthread *thread_info, int subimage, \\
 \bigspc\spc\spc ustring dataname, TypeDesc datatype, void *data)}
 
-Retrieves information about the texture named by {\cf filename}.
+Retrieves information about the texture, either named by {\cf filename} or
+specified by an opaque handle returned by {\cf get_texture_handle()}.
 The {\cf dataname} is a keyword indcating what information should
 be retrieved, {\cf datatype} is the type of data expected, and
 {\cf data} points to caller-owned memory where the results should be
 placed.  It is up to the caller to ensure that {\cf data} contains
 enough space to hold an item of the requested {\cf datatype}.
 
-The return value is {\cf true} if {\cf get_texture_info()} is able
-to find the requested {\cf dataname} and it matched the requested
-{\cf datatype}.  If the requested data was not found, or was not
-of the right data type, {\cf get_texture_info()} will return {\cf false}.
+The return value is {\cf true} if {\cf get_texture_info()} is able to answer
+the query -- that is, find the requested {\cf dataname} for the texture and
+it matched the requested {\cf datatype}.  If the requested data was not
+found, or was not of the right data type, {\cf get_texture_info()} will
+return {\cf false}. Except for the \qkw{exists} query, file that does not
+exist or could not be read properly as an image also constitutes a query
+failure that will return {\cf false}.
 
 Supported {\cf dataname} values include:
 
 \begin{description}
 \item[\spc] \spc \vspace{-12pt} 
-\item[\rm \kw{exists}] Return 1 if the file exists and
-is an image format that OpenImageIO knows how to read, otherwise return
-0.  The {\cf data} pointer is not used.
+
+\item[\rm \kw{exists}] Stores the value 1 (as an {\cf int} if the file
+exists and is an image format that \product can read, or 0 if the file
+does not exist, or could not be properly read as a texture. Note that
+unlike all other queries, this query will ``succeed'' (return {\cf true})
+even if the file does not exist.
 
 \item[\rm \kw{subimages}] The number of subimages/faces in the file, as an integer.
 
@@ -1170,13 +1197,49 @@ all accessible through the same API calls.
 \item[\rm \kw{channels}] The number of color channels in the file 
 (an integer).
 
-\item[\rm \kw{viewingmatrix}] The viewing matrix, which is a
-$4 \times 4$ matrix (an {\cf Imath::M44f}, described as {\cf
-  TypeDesc(FLOAT,MATRIX)}).
+\item[\rm \kw{datawindow}] 
+Returns the pixel data window of the image, which is either an array of 4
+integers (returning xmin, ymin, xmax, ymax) or an array of 6 integers
+(returning xmin, ymin, zmin, xmax, ymax, zmax). The $z$ values may be useful
+for 3D/volumetric images; for 2D images they will be 0).
 
-\item[\rm \kw{projectionmatrix}] The projection matrix, which is a
-$4 \times 4$ matrix (an {\cf Imath::M44f}, described as {\cf
-  TypeDesc(FLOAT,MATRIX)}).
+\item[\rm \kw{displaywindow}] 
+Returns the display (a.k.a.\ full) window of the image, which is either an
+array of 4 integers (returning xmin, ymin, xmax, ymax) or an array of 6
+integers (returning xmin, ymin, zmin, xmax, ymax, zmax). The $z$ values may
+be useful for 3D/volumetric images; for 2D images they will be 0).
+
+\item[\rm \kw{worldtocamera}] The viewing matrix, which is a $4 \times 4$
+matrix (an {\cf Imath::M44f}, described as {\cf TypeDesc(FLOAT,MATRIX)}),
+giving the world-to-camera 3D transformation matrix that was used when  the
+image was created. Generally, only rendered images will have this.
+
+\item[\rm \kw{worldtoscreen}] The projection matrix, which is a $4 \times 4$
+matrix (an {\cf Imath::M44f}, described as {\cf TypeDesc(FLOAT,MATRIX)}),
+giving the matrix that projected points from world space into a 2D screen
+coordinate system where $x$ and $y$ range from $-1$ to $+1$.  Generally,
+only rendered images will have this.
+
+\item[\rm \kw{averagecolor}] If available in the metadata (generally only
+for files that have been processed by {\cf maketx}), this will return the
+average color of the texture (into an array of floats).  \NEW
+
+\item[\rm \kw{averagealpha}] If available in the metadata (generally only
+for files that have been processed by {\cf maketx}), this will return the
+average alpha value of the texture (into a float).
+
+\item[\rm \kw{constantcolor}] If the metadata (generally only for files that
+have been processed by {\cf maketx}) indicates that the texture has the same
+values for all pixels in the texture, this will retrieve the constant color
+of the texture (into an array of floats). A non-constant image (or one that
+does not have the special metadata tag identifying it as a constant texture)
+will fail this query (return false). \NEW
+
+\item[\rm \kw{constantalpha}] If the metadata indicates that the texture has
+the same values for all pixels in the texture, this will retrieve the
+constant alpha value of the texture (into a float). A non-constant image (or
+one that does not have the special metadata tag identifying it as a constant
+texture) will fail this query (return false).
 
 \item[Anything else] -- For all other data names, the
 the metadata of the image file will be searched for an item that
@@ -1185,9 +1248,12 @@ matches both the name and data type.
 \end{description}
 \apiend
 
-\apiitem{bool {\ce get_imagespec} (ustring filename, int subimage, ImageSpec \&spec)}
+\apiitem{bool {\ce get_imagespec} (ustring filename, int subimage, ImageSpec \&spec) \\
+bool {\ce get_imagespec} (TextureHandle *texture_handle, Perthread *thread_info,\\
+  \bigspc\bigspc int subimage, ImageSpec \&spec)}
 
-If the named image is found and able to be opened by an available
+If the image (specified by either name or handle)
+is found and able to be opened by an available
 image format plugin, this function copies its image specification into
 {\cf spec} and returns {\cf true}.  Otherwise, if the file is not
 found, could not be opened, or is not of a format readable by any
@@ -1195,7 +1261,9 @@ plugin that could be found, the return value is {\cf false}.
 \apiend
 
 
-\apiitem{const ImageSpec * {\ce imagespec} (ustring filename, int subimage)}
+\apiitem{const ImageSpec * {\ce imagespec} (ustring filename, int subimage) \\
+const ImageSpec * {\ce imagespec} (TextureHandle *texture_handle, \\
+\bigspc\bigspc Perthread *thread_info, int subimage)}
 
 If the named image is found and able to be opened by an available
 image format plugin, and the designated subimage exists, this function
@@ -1212,11 +1280,18 @@ caller must beware that the pointer is only valid as long as nobody
   invalidate_all()}, or destroys the \TextureSystem.
 \apiend
 
-\apiitem{bool {\ce get_texels} (ustring filename, TextureOpt \&options, int level, \\
+\apiitem{bool {\ce get_texels} (ustring filename, TextureOpt \&options, int miplevel, \\
 \bigspc                       int xbegin, int xend, int ybegin, int yend,\\
-\bigspc                       int zbegin, int zend, TypeDesc format, void *result)}
+\bigspc                       int zbegin, int zend, int chbegin, int chend,\\
+\bigspc                       TypeDesc format, void *result) \\
+bool {\ce get_texels} (TextureHandle *texture_handle, PerThread *thread_info, \\
+\bigspc                       Perthread *thread_info, TextureOpt \&options, int miplevel, \\
+\bigspc                       int xbegin, int xend, int ybegin, int yend,\\
+\bigspc                       int zbegin, int zend, int chbegin, int chend,\\
+\bigspc                       TypeDesc format, void *result)}
 
-Retrieve a rectangle of raw unfiltered texels at the named MIP-map level, storing
+For a texture identified by either name or handle,
+retrieve a rectangle of raw unfiltered texels at the named MIP-map level, storing
 the texel values beginning at the address specified by result.
 Note that the face/subimage is communicated through {\kw options.subimage}.
 The texel values will be converted to the type specified by
@@ -1233,21 +1308,9 @@ Fields within {\cf options} that are honored for raw texel retieval
 include the following:
 
 \vspace{-12pt}
-\apiitem{int subiamge}
+\apiitem{int subimage}
 \vspace{10pt}
 The subimage to retrieve.
-\apiend
-
-\vspace{-24pt}
-\apiitem{int nchannels}
-\vspace{10pt}
-The number of color channels to look up from the texture.
-\apiend
-
-\vspace{-24pt}
-\apiitem{int firstchannel}
-\vspace{10pt}
-The index of the first channel to look up from the texture.
 \apiend
 
 % FIXME -- we should support this

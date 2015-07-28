@@ -41,18 +41,17 @@
 #include <boost/regex.hpp>
 #include <OpenEXR/ImathMatrix.h>
 
-#include "argparse.h"
-#include "dassert.h"
-#include "filesystem.h"
-#include "fmath.h"
-#include "strutil.h"
-#include "sysutil.h"
-#include "timer.h"
-#include "imageio.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "thread.h"
-#include "filter.h"
+#include "OpenImageIO/argparse.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/timer.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/filter.h"
 
 OIIO_NAMESPACE_USING
 
@@ -64,7 +63,7 @@ static std::string full_command_line;
 static std::vector<std::string> filenames;
 static std::string outputfilename;
 static bool verbose = false;
-static bool stats = false;
+static bool runstats = false;
 static int nthreads = 0;    // default: use #cores threads if available
 
 // Conversion modes.  If none are true, we just make an ordinary texture.
@@ -143,6 +142,39 @@ parse_files (int argc, const char *argv[])
 
 
 
+// Concatenate the command line into one string, optionally filtering out
+// verbose attribute commands.
+static std::string
+command_line_string (int argc, char * argv[], bool sansattrib)
+{
+    std::string s;
+    for (int i = 0;  i < argc;  ++i) {
+        if (sansattrib) {
+            // skip any filtered attributes
+            if (!strcmp(argv[i], "--attrib") || !strcmp(argv[i], "-attrib") ||
+                !strcmp(argv[i], "--sattrib") || !strcmp(argv[i], "-sattrib")) {
+                i += 2;  // also skip the following arguments
+                continue;
+            }
+            if (!strcmp(argv[i], "--sansattrib") || !strcmp(argv[i], "-sansattrib")) {
+                continue;
+            }
+        }
+        if (strchr (argv[i], ' ')) {  // double quote args with spaces
+            s += '\"';
+            s += argv[i];
+            s += '\"';
+        } else {
+            s += argv[i];
+        }
+        if (i < argc-1)
+            s += ' ';
+    }
+    return s;
+}
+
+
+
 static void
 getargs (int argc, char *argv[], ImageSpec &configspec)
 {
@@ -172,15 +204,19 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
     bool constant_color_detect = false;
     bool monochrome_detect = false;
     bool opaque_detect = false;
+    bool compute_average = true;
     int nchannels = -1;
     bool prman = false;
     bool oiio = false;
     bool ignore_unassoc = false;  // ignore unassociated alpha tags
     bool unpremult = false;
+    bool sansattrib = false;
+    float sharpen = 0.0f;
     std::string incolorspace;
     std::string outcolorspace;
     std::string channelnames;
-
+    std::vector<std::string> string_attrib_names, string_attrib_values;
+    std::vector<std::string> any_attrib_names, any_attrib_values;
     filenames.clear();
 
     ArgParse ap;
@@ -212,6 +248,7 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
                   "--filter %s", &filtername, filter_help_string().c_str(),
                   "--hicomp", &do_highlight_compensation,
                           "Compress HDR range before resize, expand after.",
+                  "--sharpen %f", &sharpen, "Sharpen MIP levels (default = 0.0 = no)",
                   "--nomipmap", &nomipmap, "Do not make multiple MIP-map levels",
                   "--checknan", &checknan, "Check for NaN/Inf values (abort if found)",
                   "--fixnan %s", &fixnan, "Attempt to fix NaN/Inf values in the image (options: none, black, box3)",
@@ -230,11 +267,16 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
                           "Set the screen matrix",
                   "--hash", NULL, "",
                   "--prman-metadata", &prman_metadata, "Add prman specific metadata",
+                  "--attrib %L %L", &any_attrib_names, &any_attrib_values, "Sets metadata attribute (name, value)",
+                  "--sattrib %L %L", &string_attrib_names, &string_attrib_values, "Sets string metadata attribute (name, value)",
+                  "--sansattrib", &sansattrib, "Write command line into Software & ImageHistory but remove --sattrib and --attrib options",
                   "--constant-color-detect", &constant_color_detect, "Create 1-tile textures from constant color inputs",
                   "--monochrome-detect", &monochrome_detect, "Create 1-channel textures from monochrome inputs",
                   "--opaque-detect", &opaque_detect, "Drop alpha channel that is always 1.0",
+                  "--no-compute-average %!", &compute_average, "Don't compute and store average color",
                   "--ignore-unassoc", &ignore_unassoc, "Ignore unassociated alpha tags in input (don't autoconvert)",
-                  "--stats", &stats, "Print runtime statistics",
+                  "--runstats", &runstats, "Print runtime statistics",
+                  "--stats", &runstats, "", // DEPRECATED 1.6
                   "--mipimage %L", &mipimages, "Specify an individual MIP level",
                   "<SEPARATOR>", "Basic modes (default is plain texture):",
                   "--shadow", &shadowmode, "Create shadow map",
@@ -304,6 +346,10 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
             configspec.format = TypeDesc::FLOAT;
         else if (dataformatname == "double")
             configspec.format = TypeDesc::DOUBLE;
+        else {
+            std::cerr << "maketx ERROR: unknown data format \"" << dataformatname << "\"\n";
+            exit (EXIT_FAILURE);
+        }
     }
 
     configspec.tile_width  = tile[0];
@@ -322,13 +368,14 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
     configspec.attribute ("wrapmodes", wrapmodes);
 
     configspec.attribute ("maketx:verbose", verbose);
-    configspec.attribute ("maketx:stats", stats);
+    configspec.attribute ("maketx:runstats", runstats);
     configspec.attribute ("maketx:resize", doresize);
     configspec.attribute ("maketx:nomipmap", nomipmap);
     configspec.attribute ("maketx:updatemode", updatemode);
     configspec.attribute ("maketx:constant_color_detect", constant_color_detect);
     configspec.attribute ("maketx:monochrome_detect", monochrome_detect);
     configspec.attribute ("maketx:opaque_detect", opaque_detect);
+    configspec.attribute ("maketx:compute_average", compute_average);
     configspec.attribute ("maketx:unpremult", unpremult);
     configspec.attribute ("maketx:incolorspace", incolorspace);
     configspec.attribute ("maketx:outcolorspace", outcolorspace);
@@ -336,6 +383,7 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
     configspec.attribute ("maketx:fixnan", fixnan);
     configspec.attribute ("maketx:set_full_to_pixels", set_full_to_pixels);
     configspec.attribute ("maketx:highlightcomp", (int)do_highlight_compensation);
+    configspec.attribute ("maketx:sharpen", sharpen);
     if (filtername.size())
         configspec.attribute ("maketx:filtername", filtername);
     configspec.attribute ("maketx:nchannels", nchannels);
@@ -349,9 +397,41 @@ getargs (int argc, char *argv[], ImageSpec &configspec)
         configspec.attribute ("maketx:mipimages", Strutil::join(mipimages,";"));
 
     std::string cmdline = Strutil::format ("OpenImageIO %s : %s",
-                                     OIIO_VERSION_STRING, ap.command_line());
+                                     OIIO_VERSION_STRING,
+                                     command_line_string (argc, argv, sansattrib));
     configspec.attribute ("Software", cmdline);
     configspec.attribute ("maketx:full_command_line", cmdline);
+
+    // Add user-specified string attributes
+    for (size_t i = 0; i < string_attrib_names.size(); ++i) {
+        configspec.attribute (string_attrib_names[i], string_attrib_values[i]);
+    }
+
+    // Add user-specified "any" attributes -- try to deduce the type
+    for (size_t i = 0; i < any_attrib_names.size(); ++i) {
+        string_view s = any_attrib_values[i];
+        // Does it parse as an int (and nothing more?)
+        int ival;
+        if (Strutil::parse_int(s,ival)) {
+            Strutil::skip_whitespace(s);
+            if (! s.size()) {
+                configspec.attribute (any_attrib_names[i], ival);
+                continue;
+            }
+        }
+        s = any_attrib_values[i];
+        // Does it parse as a float (and nothing more?)
+        float fval;
+        if (Strutil::parse_float(s,fval)) {
+            Strutil::skip_whitespace(s);
+            if (! s.size()) {
+                configspec.attribute (any_attrib_names[i], fval);
+                continue;
+            }
+        }
+        // OK, treat it like a string
+        configspec.attribute (any_attrib_names[i], any_attrib_values[i]);
+    }
 
     if (ignore_unassoc) {
         configspec.attribute ("maketx:ignore_unassoc", (int)ignore_unassoc);
@@ -369,6 +449,7 @@ main (int argc, char *argv[])
     Timer alltimer;
 
     ImageSpec configspec;
+    Filesystem::convert_native_arguments (argc, (const char **)argv);
     getargs (argc, argv, configspec);
 
     OIIO::attribute ("threads", nthreads);
@@ -388,7 +469,7 @@ main (int argc, char *argv[])
     bool ok = ImageBufAlgo::make_texture (mode, filenames[0],
                                           outputfilename, configspec,
                                           &std::cout);
-    if (stats)
+    if (runstats)
         std::cout << "\n" << ic->getstats();
 
     return ok ? 0 : EXIT_FAILURE;

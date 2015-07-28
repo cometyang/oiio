@@ -45,6 +45,17 @@ OIIO_PLUGIN_EXPORTS_BEGIN
     };
 OIIO_PLUGIN_EXPORTS_END
 
+
+
+int
+SgiOutput::supports (string_view feature) const
+{
+    return (feature == "alpha"
+         || feature == "nchannels");
+}
+
+
+
 bool
 SgiOutput::open (const std::string &name, const ImageSpec &spec,
                  OpenMode mode)
@@ -70,6 +81,13 @@ SgiOutput::open (const std::string &name, const ImageSpec &spec,
     // by any SGI reader: UINT8
     if (m_spec.format != TypeDesc::UINT8 && m_spec.format != TypeDesc::UINT16)
         m_spec.set_format (TypeDesc::UINT8);
+    m_dither = (m_spec.format == TypeDesc::UINT8) ?
+                    m_spec.get_int_attribute ("oiio:dither", 0) : 0;
+
+    // If user asked for tiles -- which this format doesn't support, emulate
+    // it by buffering the whole image.
+    if (m_spec.tile_width && m_spec.tile_height)
+        m_tilebuffer.resize (m_spec.image_bytes());
 
     return create_and_write_header();
 }
@@ -81,7 +99,8 @@ SgiOutput::write_scanline (int y, int z, TypeDesc format, const void *data,
                            stride_t xstride)
 {
     y = m_spec.height - y - 1;
-    data = to_native_scanline (format, data, xstride, m_scratch);
+    data = to_native_scanline (format, data, xstride, m_scratch,
+                               m_dither, y, z);
 
     // In SGI format all channels are saved to file separately: firsty all
     // channel 1 scanlines are saved, then all channel2 scanlines are saved
@@ -119,12 +138,37 @@ SgiOutput::write_scanline (int y, int z, TypeDesc format, const void *data,
 
 
 bool
+SgiOutput::write_tile (int x, int y, int z, TypeDesc format,
+                       const void *data, stride_t xstride,
+                       stride_t ystride, stride_t zstride)
+{
+    // Emulate tiles by buffering the whole image
+    return copy_tile_to_image_buffer (x, y, z, format, data, xstride,
+                                      ystride, zstride, &m_tilebuffer[0]);
+}
+
+
+
+bool
 SgiOutput::close ()
 {
-    if (m_fd)
-        fclose (m_fd);
+    if (! m_fd) {   // already closed
+        init ();
+        return true;
+    }
+
+    bool ok = true;
+    if (m_spec.tile_width) {
+        // Handle tile emulation -- output the buffered pixels
+        ASSERT (m_tilebuffer.size());
+        ok &= write_scanlines (m_spec.y, m_spec.y+m_spec.height, 0,
+                               m_spec.format, &m_tilebuffer[0]);
+        std::vector<unsigned char>().swap (m_tilebuffer);
+    }
+
+    fclose (m_fd);
     init ();
-    return true;
+    return ok;
 }
 
 

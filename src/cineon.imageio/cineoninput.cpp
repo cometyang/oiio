@@ -30,11 +30,11 @@
 
 #include "libcineon/Cineon.h"
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "fmath.h"
-#include "strutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/strutil.h"
 
 using namespace cineon;
 
@@ -271,7 +271,7 @@ CineonInput::open (const std::string &name, ImageSpec &newspec)
                                                 TypeDesc (TypeDesc::FLOAT,  \
                                                 2), &floats[0])
 #define CINEON_SET_ATTRIB_STR(X, x)     if (m_cin.header.x[0]               \
-                                        && m_cin.header.x[0] != -1)         \
+                                        && m_cin.header.x[0] != char(-1))   \
                                             m_spec.attribute ("cineon:" #X, \
                                                 m_cin.header.x)
 

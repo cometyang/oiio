@@ -33,16 +33,25 @@
 #include <cstdlib>
 #include <string>
 
-#include "dassert.h"
-#include "half.h"
-#include "ustring.h"
-#include "strutil.h"
+#include <OpenEXR/half.h>
 
-#include "typedesc.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/ustring.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/typedesc.h"
 
 
 OIIO_NAMESPACE_ENTER
 {
+
+TypeDesc::TypeDesc (string_view typestring)
+    : basetype(UNKNOWN), aggregate(SCALAR), vecsemantics(NOXFORM),
+      reserved(0), arraylen(0)
+{
+    fromstring (typestring);
+}
+
+
 
 TypeDesc::TypeDesc (const char *typestring)
     : basetype(UNKNOWN), aggregate(SCALAR), vecsemantics(NOXFORM),
@@ -82,6 +91,35 @@ TypeDesc::basesize () const
     DASSERT (basetype < TypeDesc::LASTBASE);
     return basetype_size[basetype];
 }
+
+
+
+bool
+TypeDesc::is_floating_point () const
+{
+    static bool isfloat[] = {
+        0, // UNKNOWN
+        0, // VOID
+        0, // UCHAR
+        0, // CHAR
+        0, // USHORT
+        0, // SHORT
+        0, // UINT
+        0, // INT
+        0, // ULONGLONG
+        0, // LONGLONG
+        1, // HALF
+        1, // FLOAT
+        1, // DOUBLE
+        0, // STRING
+        0  // PTR
+    };
+    DASSERT (sizeof(isfloat)/sizeof(isfloat[0]) == TypeDesc::LASTBASE);
+    DASSERT (basetype < TypeDesc::LASTBASE);
+    return isfloat[basetype];
+}
+
+
 
 namespace {
 
@@ -128,11 +166,20 @@ TypeDesc::c_str () const
 {
     // FIXME : how about a per-thread cache of the last one or two, so
     // we don't have to re-assemble strings all the time?
+
+    // Timecode and Keycode are hard coded
+    if (basetype == UINT && vecsemantics == TIMECODE && arraylen == 2)
+        return ustring("timecode").c_str();
+    else if (basetype == INT && vecsemantics == KEYCODE && arraylen == 7)
+        return ustring("keycode").c_str();
+
     std::string result;
     if (aggregate == SCALAR)
         result = basetype_name[basetype];
     else if (aggregate == MATRIX44 && basetype == FLOAT)
         result = "matrix";
+    else if (aggregate == VEC4 && basetype == FLOAT && vecsemantics == NOXFORM)
+        result = "float4";
     else if (vecsemantics == NOXFORM) {
         const char *agg = "";
         switch (aggregate) {
@@ -197,17 +244,27 @@ copy_until (const char *src, const char *delim, char *dst, size_t maxlen)
 size_t
 TypeDesc::fromstring (const char *typestring)
 {
-    TypeDesc t;
-    size_t len = 0;
-    if (! typestring)
+    return fromstring (string_view(typestring));
+}
+
+
+
+size_t
+TypeDesc::fromstring (string_view typestring)
+{
+    *this = TypeDesc::UNKNOWN;
+    string_view orig = typestring;
+    if (typestring.empty()) {
         return 0;
+    }
 
     // The first "word" should be a type name.
-    char type[16];
-    len = copy_until (typestring, " [", type, sizeof(type));
+    string_view type = Strutil::parse_identifier (typestring);
+
     // Check the scalar types in our table above
+    TypeDesc t;
     for (int i = 0;  i < LASTBASE;  ++i) {
-        if (! strcmp (type, basetype_name[i])) {
+        if (type == basetype_name[i]) {
             t.basetype = i;
             break;
         }
@@ -217,43 +274,31 @@ TypeDesc::fromstring (const char *typestring)
     if (t.basetype != UNKNOWN) {
         // already solved
     }
-    else if (! strcmp (type, "color"))
+    else if (type == "color")
         t = TypeColor;
-    else if (! strcmp (type, "point"))
+    else if (type == "point")
         t = TypePoint;
-    else if (! strcmp (type, "vector"))
+    else if (type == "vector")
         t = TypeVector;
-    else if (! strcmp (type, "normal"))
+    else if (type == "normal")
         t = TypeNormal;
-    else if (! strcmp (type, "matrix"))
+    else if (type == "matrix")
         t = TypeMatrix;
     else {
         return 0;  // unknown
     }
 
     // Is there an array length following the type name?
-    while (typestring[len] == ' ')
-        ++len;
-    if (typestring[len] == '[') {
-        ++len;
-        while (typestring[len] == ' ')
-            ++len;
-        if (typestring[len] == ']') {   // '[]' indicates array of unknown len
-            t.arraylen = -1;
-        } else {
-            t.arraylen = atoi (typestring+len);
-            while ((typestring[len] >= '0' && typestring[len] <= '9') ||
-                   typestring[len] == ' ')
-                ++len;
-        }
-        if (typestring[len] == ']')
-            ++len;
-        else
-            return 0;
+    if (Strutil::parse_char (typestring, '[')) {
+        int arraylen = -1;
+        Strutil::parse_int (typestring, arraylen);
+        if (! Strutil::parse_char (typestring, ']'))
+            return 0;   // malformed
+        t.arraylen = arraylen;
     }
 
     *this = t;
-    return len;
+    return orig.length() - typestring.length();
 }
 
     
@@ -344,6 +389,21 @@ std::string tostring (TypeDesc type, const void *data,
 
 
 
+bool
+TypeDesc::operator< (const TypeDesc &x) const
+{
+    if (basetype != x.basetype)
+        return basetype < x.basetype;
+    if (aggregate != x.aggregate)
+        return aggregate < x.aggregate;
+    if (arraylen != x.arraylen)
+        return arraylen < x.arraylen;
+    if (vecsemantics != x.vecsemantics)
+        return vecsemantics < x.vecsemantics;
+    return false;  // they are equal
+}
+
+
 
 const TypeDesc TypeDesc::TypeFloat (TypeDesc::FLOAT);
 const TypeDesc TypeDesc::TypeColor (TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::COLOR);
@@ -353,6 +413,10 @@ const TypeDesc TypeDesc::TypeNormal (TypeDesc::FLOAT, TypeDesc::VEC3, TypeDesc::
 const TypeDesc TypeDesc::TypeMatrix (TypeDesc::FLOAT,TypeDesc::MATRIX44);
 const TypeDesc TypeDesc::TypeString (TypeDesc::STRING);
 const TypeDesc TypeDesc::TypeInt (TypeDesc::INT);
+const TypeDesc TypeDesc::TypeHalf (TypeDesc::HALF);
+const TypeDesc TypeDesc::TypeTimeCode (TypeDesc::UINT, TypeDesc::SCALAR, TypeDesc::TIMECODE, 2);
+const TypeDesc TypeDesc::TypeKeyCode (TypeDesc::INT, TypeDesc::SCALAR, TypeDesc::KEYCODE, 7);
+const TypeDesc TypeDesc::TypeFloat4 (TypeDesc::FLOAT, TypeDesc::VEC4);
 
 
 }

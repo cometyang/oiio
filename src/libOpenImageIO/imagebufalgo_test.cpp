@@ -31,11 +31,11 @@
 // Based on the sample at:
 // http://code.google.com/p/googletest/wiki/GoogleTestPrimer#Writing_the_main()_Function
 
-#include "imageio.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "sysutil.h"
-#include "unittest.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/imagebufalgo_util.h"
+#include "OpenImageIO/unittest.h"
 
 #include <iostream>
 #include <iomanip>
@@ -43,6 +43,34 @@
 #include <cstdio>
 
 OIIO_NAMESPACE_USING;
+
+
+void test_type_merge ()
+{
+    std::cout << "test type_merge\n";
+    using namespace OIIO::ImageBufAlgo;
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::UINT8, TypeDesc::UINT8),
+                      TypeDesc::UINT8);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::UINT8, TypeDesc::FLOAT),
+                      TypeDesc::FLOAT);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::FLOAT, TypeDesc::UINT8),
+                      TypeDesc::FLOAT);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::UINT8, TypeDesc::UINT16),
+                      TypeDesc::UINT16);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::UINT16, TypeDesc::FLOAT),
+                      TypeDesc::FLOAT);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::HALF, TypeDesc::FLOAT),
+                      TypeDesc::FLOAT);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::HALF, TypeDesc::UINT8),
+                      TypeDesc::HALF);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::HALF, TypeDesc::UNKNOWN),
+                      TypeDesc::HALF);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::FLOAT, TypeDesc::UNKNOWN),
+                      TypeDesc::FLOAT);
+    OIIO_CHECK_EQUAL (type_merge(TypeDesc::UINT8, TypeDesc::UNKNOWN),
+                      TypeDesc::UINT8);
+}
+
 
 
 // Test ImageBuf::zero and ImageBuf::fill
@@ -56,7 +84,7 @@ void test_zero_fill ()
     spec.alpha_channel = 3;
 
     // Create a buffer -- pixels should be undefined
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
     
     // Set a pixel to an odd value, make sure it takes
     const float arbitrary1[CHANNELS] = { 0.2, 0.3, 0.4, 0.5 };
@@ -122,8 +150,8 @@ void test_crop ()
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
     spec.alpha_channel = 3;
     ImageBuf A, B;
-    A.reset ("A", spec);
-    B.reset ("B", spec);
+    A.reset (spec);
+    B.reset (spec);
     float arbitrary1[4];
     arbitrary1[0] = 0.2;
     arbitrary1[1] = 0.3;
@@ -157,7 +185,7 @@ void test_paste ()
     std::cout << "test paste\n";
     // Create the source image, make it a gradient
     ImageSpec Aspec (4, 4, 3, TypeDesc::FLOAT);
-    ImageBuf A ("A", Aspec);
+    ImageBuf A (Aspec);
     for (ImageBuf::Iterator<float> it (A);  !it.done();  ++it) {
         it[0] = float(it.x()) / float(Aspec.width-1);
         it[1] = float(it.y()) / float(Aspec.height-1);
@@ -166,7 +194,7 @@ void test_paste ()
 
     // Create destination image -- black it out
     ImageSpec Bspec (8, 8, 3, TypeDesc::FLOAT);
-    ImageBuf B ("B", Bspec);
+    ImageBuf B (Bspec);
     float gray[3] = { .1, .1, .1 };
     ImageBufAlgo::fill (B, gray);
 
@@ -200,8 +228,8 @@ void test_channel_append ()
 {
     std::cout << "test channel_append\n";
     ImageSpec spec (2, 2, 1, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
-    ImageBuf B ("B", spec);
+    ImageBuf A (spec);
+    ImageBuf B (spec);
     float Acolor = 0.1, Bcolor = 0.2;
     ImageBufAlgo::fill (A, &Acolor);
     ImageBufAlgo::fill (B, &Bcolor);
@@ -223,31 +251,134 @@ void test_channel_append ()
 void test_add ()
 {
     std::cout << "test add\n";
-    const int WIDTH = 8;
-    const int HEIGHT = 8;
-    const int CHANNELS = 4;
+    const int WIDTH = 4, HEIGHT = 4, CHANNELS = 4;
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    spec.alpha_channel = 3;
 
     // Create buffers
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
     const float Aval[CHANNELS] = { 0.1, 0.2, 0.3, 0.4 };
     ImageBufAlgo::fill (A, Aval);
-    ImageBuf B ("B", spec);
+    ImageBuf B (spec);
     const float Bval[CHANNELS] = { 0.01, 0.02, 0.03, 0.04 };
     ImageBufAlgo::fill (B, Bval);
 
-    ImageBuf C ("C", spec);
-    ImageBufAlgo::add (C, A, B);
+    // Test addition of images
+    ImageBuf R (spec);
+    ImageBufAlgo::add (R, A, B);
+    for (int j = 0;  j < spec.height;  ++j)
+        for (int i = 0;  i < spec.width;  ++i)
+            for (int c = 0;  c < spec.nchannels;  ++c)
+                OIIO_CHECK_EQUAL (R.getchannel (i, j, 0, c), Aval[c] + Bval[c]);
 
-    for (int j = 0;  j < HEIGHT;  ++j) {
-        for (int i = 0;  i < WIDTH;  ++i) {
-            float pixel[CHANNELS];
-            C.getpixel (i, j, pixel);
-            for (int c = 0;  c < CHANNELS;  ++c)
-                OIIO_CHECK_EQUAL (pixel[c], Aval[c]+Bval[c]);
-        }
-    }
+    // Test addition of image and constant color
+    ImageBuf D (spec);
+    ImageBufAlgo::add (D, A, Bval);
+    ImageBufAlgo::CompareResults comp;
+    ImageBufAlgo::compare (R, D, 1e-6, 1e-6, comp);
+    OIIO_CHECK_EQUAL (comp.maxerror, 0.0);
+}
+
+
+
+// Tests ImageBufAlgo::sub
+void test_sub ()
+{
+    std::cout << "test sub\n";
+    const int WIDTH = 4, HEIGHT = 4, CHANNELS = 4;
+    ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
+
+    // Create buffers
+    ImageBuf A (spec);
+    const float Aval[CHANNELS] = { 0.1, 0.2, 0.3, 0.4 };
+    ImageBufAlgo::fill (A, Aval);
+    ImageBuf B (spec);
+    const float Bval[CHANNELS] = { 0.01, 0.02, 0.03, 0.04 };
+    ImageBufAlgo::fill (B, Bval);
+
+    // Test subtraction of images
+    ImageBuf R (spec);
+    ImageBufAlgo::sub (R, A, B);
+    for (int j = 0;  j < spec.height;  ++j)
+        for (int i = 0;  i < spec.width;  ++i)
+            for (int c = 0;  c < spec.nchannels;  ++c)
+                OIIO_CHECK_EQUAL (R.getchannel (i, j, 0, c), Aval[c] - Bval[c]);
+
+    // Test subtraction of image and constant color
+    ImageBuf D (spec);
+    ImageBufAlgo::sub (D, A, Bval);
+    ImageBufAlgo::CompareResults comp;
+    ImageBufAlgo::compare (R, D, 1e-6, 1e-6, comp);
+    OIIO_CHECK_EQUAL (comp.maxerror, 0.0);
+}
+
+
+
+// Tests ImageBufAlgo::mul
+void test_mul ()
+{
+    std::cout << "test mul\n";
+    const int WIDTH = 4, HEIGHT = 4, CHANNELS = 4;
+    ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
+
+    // Create buffers
+    ImageBuf A (spec);
+    const float Aval[CHANNELS] = { 0.1, 0.2, 0.3, 0.4 };
+    ImageBufAlgo::fill (A, Aval);
+    ImageBuf B (spec);
+    const float Bval[CHANNELS] = { 0.01, 0.02, 0.03, 0.04 };
+    ImageBufAlgo::fill (B, Bval);
+
+    // Test multiplication of images
+    ImageBuf R (spec);
+    ImageBufAlgo::mul (R, A, B);
+    for (int j = 0;  j < spec.height;  ++j)
+        for (int i = 0;  i < spec.width;  ++i)
+            for (int c = 0;  c < spec.nchannels;  ++c)
+                OIIO_CHECK_EQUAL (R.getchannel (i, j, 0, c), Aval[c] * Bval[c]);
+
+    // Test multiplication of image and constant color
+    ImageBuf D (spec);
+    ImageBufAlgo::mul (D, A, Bval);
+    ImageBufAlgo::CompareResults comp;
+    ImageBufAlgo::compare (R, D, 1e-6, 1e-6, comp);
+    OIIO_CHECK_EQUAL (comp.maxerror, 0.0);
+}
+
+
+
+// Tests ImageBufAlgo::mad
+void test_mad ()
+{
+    std::cout << "test mad\n";
+    const int WIDTH = 4, HEIGHT = 4, CHANNELS = 4;
+    ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
+
+    // Create buffers
+    ImageBuf A (spec);
+    const float Aval[CHANNELS] = { 0.1, 0.2, 0.3, 0.4 };
+    ImageBufAlgo::fill (A, Aval);
+    ImageBuf B (spec);
+    const float Bval[CHANNELS] = { 1, 2, 3, 4 };
+    ImageBufAlgo::fill (B, Bval);
+    ImageBuf C (spec);
+    const float Cval[CHANNELS] = { 0.01, 0.02, 0.03, 0.04 };
+    ImageBufAlgo::fill (C, Cval);
+
+    // Test multiplication of images
+    ImageBuf R (spec);
+    ImageBufAlgo::mad (R, A, B, C);
+    for (int j = 0;  j < spec.height;  ++j)
+        for (int i = 0;  i < spec.width;  ++i)
+            for (int c = 0;  c < spec.nchannels;  ++c)
+                OIIO_CHECK_EQUAL (R.getchannel (i, j, 0, c),
+                                  Aval[c] * Bval[c] + Cval[c]);
+
+    // Test multiplication of image and constant color
+    ImageBuf D (spec);
+    ImageBufAlgo::mad (D, A, Bval, Cval);
+    ImageBufAlgo::CompareResults comp;
+    ImageBufAlgo::compare (R, D, 1e-6, 1e-6, comp);
+    OIIO_CHECK_EQUAL (comp.maxerror, 0.0);
 }
 
 
@@ -259,8 +390,8 @@ void test_compare ()
     // Construct two identical 50% grey images
     const int WIDTH = 10, HEIGHT = 10, CHANNELS = 3;
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
-    ImageBuf B ("B", spec);
+    ImageBuf A (spec);
+    ImageBuf B (spec);
     const float grey[CHANNELS] = { 0.5, 0.5, 0.5 };
     ImageBufAlgo::fill (A, grey);
     ImageBufAlgo::fill (B, grey);
@@ -304,7 +435,7 @@ void test_isConstantColor ()
     std::cout << "test isConstantColor\n";
     const int WIDTH = 10, HEIGHT = 10, CHANNELS = 3;
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
     const float col[CHANNELS] = { 0.25, 0.5, 0.75 };
     ImageBufAlgo::fill (A, col);
 
@@ -334,7 +465,7 @@ void test_isConstantChannel ()
     std::cout << "test isConstantChannel\n";
     const int WIDTH = 10, HEIGHT = 10, CHANNELS = 3;
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
     const float col[CHANNELS] = { 0.25, 0.5, 0.75 };
     ImageBufAlgo::fill (A, col);
 
@@ -358,7 +489,7 @@ void test_isMonochrome ()
     std::cout << "test isMonochrome\n";
     const int WIDTH = 10, HEIGHT = 10, CHANNELS = 3;
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
     const float col[CHANNELS] = { 0.25, 0.25, 0.25 };
     ImageBufAlgo::fill (A, col);
 
@@ -384,9 +515,9 @@ test_maketx_from_imagebuf()
     // Make a checkerboard
     const int WIDTH = 16, HEIGHT = 16, CHANNELS = 3;
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
     float pink[] = { .5, .3, .3 }, green[] = { .1, .5, .1 };
-    ImageBufAlgo::checker (A, 4, pink, green, 0, WIDTH, 0, HEIGHT, 0, 1);
+    ImageBufAlgo::checker (A, 4, 4, 4, pink, green);
 
     // Write it
     const char *pgname = "oiio-pgcheck.tx";
@@ -411,11 +542,15 @@ test_maketx_from_imagebuf()
 int
 main (int argc, char **argv)
 {
+    test_type_merge ();
     test_zero_fill ();
     test_crop ();
     test_paste ();
     test_channel_append ();
     test_add ();
+    test_sub ();
+    test_mul ();
+    test_mad ();
     test_compare ();
     test_isConstantColor ();
     test_isConstantChannel ();

@@ -40,12 +40,10 @@
 #include <iostream>
 #include <limits>
 
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "imagebufalgo_util.h"
-#include "dassert.h"
-#include "sysutil.h"
-#include "thread.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/imagebufalgo_util.h"
+#include "OpenImageIO/dassert.h"
 
 
 
@@ -53,30 +51,32 @@ OIIO_NAMESPACE_ENTER
 {
 
 
-template<class D>
+template<class D, class S>
 static bool
-clamp_ (ImageBuf &dst, const float *min, const float *max,
+clamp_ (ImageBuf &dst, const ImageBuf &src,
+        const float *min, const float *max,
         bool clampalpha01, ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Lots of pixels and request for multi threads? Parallelize.
         ImageBufAlgo::parallel_image (
-            boost::bind(clamp_<D>, boost::ref(dst), min, max, clampalpha01,
+            boost::bind(clamp_<D,S>, boost::ref(dst), boost::cref(src),
+                        min, max, clampalpha01,
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
     }
 
     // Serial case
-    for (ImageBuf::Iterator<D> d (dst, roi);  ! d.done();  ++d) {
+    ImageBuf::ConstIterator<S> s (src, roi);
+    for (ImageBuf::Iterator<D> d (dst, roi);  ! d.done();  ++d, ++s) {
         for (int c = roi.chbegin;  c < roi.chend;  ++c)
-            d[c] = OIIO::clamp<float> (d[c], min[c], max[c]);
+            d[c] = OIIO::clamp<float> (s[c], min[c], max[c]);
     }
-    int a = dst.spec().alpha_channel;
+    int a = src.spec().alpha_channel;
     if (clampalpha01 && a >= roi.chbegin && a < roi.chend) {
-        for (ImageBuf::Iterator<D> d (dst, roi);  ! d.done();  ++d) {
+        for (ImageBuf::Iterator<D> d (dst, roi);  ! d.done();  ++d)
             d[a] = OIIO::clamp<float> (d[a], 0.0f, 1.0f);
-        }
     }
     return true;
 }
@@ -84,10 +84,12 @@ clamp_ (ImageBuf &dst, const float *min, const float *max,
 
 
 bool
-ImageBufAlgo::clamp (ImageBuf &dst, const float *min, const float *max,
+ImageBufAlgo::clamp (ImageBuf &dst, const ImageBuf &src,
+                     const float *min, const float *max,
                      bool clampalpha01, ROI roi, int nthreads)
 {
-    IBAprep (roi, &dst);
+    if (! IBAprep (roi, &dst, &src))
+        return false;
     std::vector<float> minvec, maxvec;
     if (! min) {
         minvec.resize (dst.nchannels(), -std::numeric_limits<float>::max());
@@ -97,88 +99,23 @@ ImageBufAlgo::clamp (ImageBuf &dst, const float *min, const float *max,
         maxvec.resize (dst.nchannels(), std::numeric_limits<float>::max());
         max = &maxvec[0];
     }
-    OIIO_DISPATCH_TYPES ("clamp", clamp_, dst.spec().format, dst,
-                         min, max, clampalpha01, roi, nthreads);
-    return false;
+    bool ok;
+    OIIO_DISPATCH_TYPES2 (ok, "clamp", clamp_, dst.spec().format,
+                          src.spec().format, dst, src,
+                          min, max, clampalpha01, roi, nthreads);
+    return ok;
 }
 
 
 
 bool
-ImageBufAlgo::clamp (ImageBuf &dst, float min, float max,
+ImageBufAlgo::clamp (ImageBuf &dst, const ImageBuf &src,
+                     float min, float max,
                      bool clampalpha01, ROI roi, int nthreads)
 {
-    IBAprep (roi, &dst);
-    std::vector<float> minvec (dst.nchannels(), min);
-    std::vector<float> maxvec (dst.nchannels(), max);
-    OIIO_DISPATCH_TYPES ("clamp", clamp_, dst.spec().format, dst,
-                         &minvec[0], &maxvec[0], clampalpha01, roi, nthreads);
-    return false;
-}
-
-
-
-// DEPRECATED version
-bool
-ImageBufAlgo::add (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
-                   int options)
-{
-    // Sanity checks
-    
-    // dst must be distinct from A and B
-    if ((const void *)&A == (const void *)&dst ||
-        (const void *)&B == (const void *)&dst) {
-        dst.error ("destination image must be distinct from source");
-        return false;
-    }
-    
-    // all three images must have the same number of channels
-    if (A.spec().nchannels != B.spec().nchannels) {
-        dst.error ("channel number mismatch: %d vs. %d", 
-                   A.spec().nchannels, B.spec().nchannels);
-        return false;
-    }
-    
-    // If dst has not already been allocated, set it to the right size,
-    // make it unconditinally float
-    if (! dst.pixels_valid()) {
-        ImageSpec dstspec = A.spec();
-        dstspec.set_format (TypeDesc::TypeFloat);
-        dst.alloc (dstspec);
-    }
-    // Clear dst pixels if instructed to do so
-    if (options & ADD_CLEAR_DST) {
-        zero (dst);
-    }
-      
-    ASSERT (A.spec().format == TypeDesc::FLOAT &&
-            B.spec().format == TypeDesc::FLOAT &&
-            dst.spec().format == TypeDesc::FLOAT);
-    
-    ImageBuf::ConstIterator<float,float> a (A);
-    ImageBuf::ConstIterator<float,float> b (B);
-    ImageBuf::Iterator<float> d (dst);
-    int nchannels = A.nchannels();
-    // Loop over all pixels in A
-    for ( ; a.valid();  ++a) {  
-        // Point the iterators for B and dst to the corresponding pixel
-        if (options & ADD_RETAIN_WINDOWS) {
-            b.pos (a.x(), a.y());
-        } else {
-            // ADD_ALIGN_WINDOWS: make B line up with A
-            b.pos (a.x()-A.xbegin()+B.xbegin(), a.y()-A.ybegin()+B.ybegin());
-        }
-        d.pos (a.x(), b.y());
-        
-        if (! b.valid() || ! d.valid())
-            continue;   // Skip pixels that don't align
-        
-        // Add the pixel
-        for (int c = 0;  c < nchannels;  ++c)
-              d[c] = a[c] + b[c];
-    }
-    
-    return true;
+    std::vector<float> minvec (src.nchannels(), min);
+    std::vector<float> maxvec (src.nchannels(), max);
+    return clamp (dst, src, &minvec[0], &maxvec[0], clampalpha01, roi, nthreads);
 }
 
 
@@ -210,28 +147,16 @@ add_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B,
 
 
 
-bool
-ImageBufAlgo::add (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
-                   ROI roi, int nthreads)
-{
-    IBAprep (roi, &dst, &A, &B);
-    OIIO_DISPATCH_COMMON_TYPES3 ("add", add_impl, dst.spec().format,
-                                 A.spec().format, B.spec().format,
-                                 dst, A, B, roi, nthreads);
-    return true;
-}
-
-
-
-template<class Rtype>
+template<class Rtype, class Atype>
 static bool
-add_inplace (ImageBuf &R, const float *val,
-             ROI roi, int nthreads)
+add_impl (ImageBuf &R, const ImageBuf &A, const float *b,
+          ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Possible multiple thread case -- recurse via parallel_image
         ImageBufAlgo::parallel_image (
-            boost::bind(add_inplace<Rtype>, boost::ref(R), val,
+            boost::bind(add_impl<Rtype,Atype>,
+                        boost::ref(R), boost::cref(A), b,
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
@@ -239,33 +164,58 @@ add_inplace (ImageBuf &R, const float *val,
 
     // Serial case
     ImageBuf::Iterator<Rtype> r (R, roi);
-    for ( ;  !r.done();  ++r)
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    for ( ;  !r.done();  ++r, ++a)
         for (int c = roi.chbegin;  c < roi.chend;  ++c)
-            r[c] = r[c] + val[c];
+            r[c] = a[c] + b[c];
     return true;
 }
 
 
 
 bool
-ImageBufAlgo::add (ImageBuf &dst, const float *val, ROI roi, int nthreads)
+ImageBufAlgo::add (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
+                   ROI roi, int nthreads)
 {
-    IBAprep (roi, &dst);
-    OIIO_DISPATCH_TYPES ("add", add_inplace, dst.spec().format,
-                         dst, val, roi, nthreads);
-    return true;
+    if (! IBAprep (roi, &dst, &A, &B, NULL, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "add", add_impl, dst.spec().format,
+                                 A.spec().format, B.spec().format,
+                                 dst, A, B, roi, nthreads);
+    return ok;
 }
 
 
 
 bool
-ImageBufAlgo::add (ImageBuf &R, float val, ROI roi, int nthreads)
+ImageBufAlgo::add (ImageBuf &dst, const ImageBuf &A, const float *b,
+                   ROI roi, int nthreads)
 {
-    int nc = R.nchannels();
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "add", add_impl, dst.spec().format,
+                          A.spec().format, dst, A, b, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::add (ImageBuf &dst, const ImageBuf &A, float b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = A.nchannels();
     float *vals = ALLOCA (float, nc);
     for (int c = 0;  c < nc;  ++c)
-        vals[c] = val;
-    return add (R, vals, roi, nthreads);
+        vals[c] = b;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "add", add_impl, dst.spec().format,
+                          A.spec().format, dst, A, vals, roi, nthreads);
+    return ok;
 }
 
 
@@ -302,12 +252,160 @@ bool
 ImageBufAlgo::sub (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
                    ROI roi, int nthreads)
 {
-    IBAprep (roi, &dst, &A, &B);
-    OIIO_DISPATCH_COMMON_TYPES3 ("sub", sub_impl, dst.spec().format,
+    if (! IBAprep (roi, &dst, &A, &B, NULL, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "sub", sub_impl, dst.spec().format,
                                  A.spec().format, B.spec().format,
                                  dst, A, B, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::sub (ImageBuf &dst, const ImageBuf &A, const float *b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = A.nchannels();
+    float *vals = ALLOCA (float, nc);
+    for (int c = 0;  c < nc;  ++c)
+        vals[c] = -b[c];
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "sub", add_impl, dst.spec().format,
+                          A.spec().format, dst, A, vals, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::sub (ImageBuf &dst, const ImageBuf &A, float b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = A.nchannels();
+    float *vals = ALLOCA (float, nc);
+    for (int c = 0;  c < nc;  ++c)
+        vals[c] = -b;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "sub", add_impl, dst.spec().format,
+                          A.spec().format, dst, A, vals, roi, nthreads);
+    return ok;
+}
+
+
+
+template<class Rtype, class Atype, class Btype>
+static bool
+absdiff_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B,
+              ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(absdiff_impl<Rtype,Atype,Btype>,
+                        boost::ref(R), boost::cref(A), boost::cref(B),
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    ImageBuf::Iterator<Rtype> r (R, roi);
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    ImageBuf::ConstIterator<Btype> b (B, roi);
+    for ( ;  !r.done();  ++r, ++a, ++b)
+        for (int c = roi.chbegin;  c < roi.chend;  ++c)
+            r[c] = std::abs (a[c] - b[c]);
     return true;
 }
+
+
+template<class Rtype, class Atype>
+static bool
+absdiff_impl (ImageBuf &R, const ImageBuf &A, const float *b,
+              ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(absdiff_impl<Rtype,Atype>,
+                        boost::ref(R), boost::cref(A), b,
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    ImageBuf::Iterator<Rtype> r (R, roi);
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    for ( ;  !r.done();  ++r, ++a)
+        for (int c = roi.chbegin;  c < roi.chend;  ++c)
+            r[c] = std::abs (a[c] - b[c]);
+    return true;
+}
+
+
+
+
+bool
+ImageBufAlgo::absdiff (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
+                       ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, &B, NULL, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "absdiff", absdiff_impl, dst.spec().format,
+                                 A.spec().format, B.spec().format,
+                                 dst, A, B, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::absdiff (ImageBuf &dst, const ImageBuf &A, const float *b,
+                       ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "absdiff", absdiff_impl, dst.spec().format,
+                          A.spec().format, dst, A, b, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::absdiff (ImageBuf &dst, const ImageBuf &A, float b,
+                       ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = A.nchannels();
+    float *vals = ALLOCA (float, nc);
+    for (int c = 0;  c < nc;  ++c)
+        vals[c] = b;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "absdiff", absdiff_impl, dst.spec().format,
+                          A.spec().format, dst, A, vals, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::abs (ImageBuf &dst, const ImageBuf &A, ROI roi, int nthreads)
+{
+    // Define abs in terms of absdiff(A,0.0)
+    return absdiff (dst, A, 0.0f, roi, nthreads);
+}
+
 
 
 
@@ -342,57 +440,350 @@ bool
 ImageBufAlgo::mul (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
                    ROI roi, int nthreads)
 {
-    IBAprep (roi, &dst, &A, &B);
-    OIIO_DISPATCH_COMMON_TYPES3 ("mul", mul_impl, dst.spec().format,
+    if (! IBAprep (roi, &dst, &A, &B, NULL, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "mul", mul_impl, dst.spec().format,
                                  A.spec().format, B.spec().format,
                                  dst, A, B, roi, nthreads);
-    return true;
+    return ok;
 }
 
 
 
-template<class Rtype>
+template<class Rtype, class Atype>
 static bool
-mul_impl (ImageBuf &R, const float *val, ROI roi, int nthreads)
+mul_impl (ImageBuf &R, const ImageBuf &A, const float *b,
+          ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Possible multiple thread case -- recurse via parallel_image
         ImageBufAlgo::parallel_image (
-            boost::bind(mul_impl<Rtype>, boost::ref(R), val,
+            boost::bind(mul_impl<Rtype,Atype>, boost::ref(R), boost::cref(A), b,
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
     }
 
-    ImageBuf::Iterator<Rtype> r (R, roi);
-    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r)
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r, ++a)
         for (int c = roi.chbegin;  c < roi.chend;  ++c)
-            r[c] = r[c] * val[c];
+            r[c] = a[c] * b[c];
     return true;
+}
+
+
+bool
+ImageBufAlgo::mul (ImageBuf &dst, const ImageBuf &A, const float *b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "mul", mul_impl, dst.spec().format,
+                          A.spec().format, dst, A, b, roi, nthreads);
+    return ok;
 }
 
 
 
 bool
-ImageBufAlgo::mul (ImageBuf &dst, const float *val, ROI roi, int nthreads)
+ImageBufAlgo::mul (ImageBuf &dst, const ImageBuf &A, float b,
+                   ROI roi, int nthreads)
 {
-    IBAprep (roi, &dst);
-    OIIO_DISPATCH_TYPES ("mul", mul_impl, dst.spec().format,
-                         dst, val, roi, nthreads);
-    return true;
-}
-
-
-
-bool
-ImageBufAlgo::mul (ImageBuf &R, float val, ROI roi, int nthreads)
-{
-    int nc = R.nchannels();
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = A.nchannels();
     float *vals = ALLOCA (float, nc);
     for (int c = 0;  c < nc;  ++c)
-        vals[c] = val;
-    return mul (R, vals, roi, nthreads);
+        vals[c] = b;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "mul", mul_impl, dst.spec().format,
+                          A.spec().format, dst, A, vals, roi, nthreads);
+    return ok;
 }
+
+
+
+
+template<class Rtype, class Atype, class Btype>
+static bool
+div_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B,
+          ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(div_impl<Rtype,Atype,Btype>,
+                        boost::ref(R), boost::cref(A), boost::cref(B),
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    ImageBuf::Iterator<Rtype> r (R, roi);
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    ImageBuf::ConstIterator<Btype> b (B, roi);
+    for ( ;  !r.done();  ++r, ++a, ++b)
+        for (int c = roi.chbegin;  c < roi.chend;  ++c) {
+            float v = b[c];
+            r[c] = (v == 0.0f) ? 0.0f : (a[c] / v);
+        }
+    return true;
+}
+
+
+
+bool
+ImageBufAlgo::div (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, &B, NULL, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "div", div_impl, dst.spec().format,
+                                 A.spec().format, B.spec().format,
+                                 dst, A, B, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::div (ImageBuf &dst, const ImageBuf &A, const float *b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = dst.nchannels();
+    float *binv = OIIO_ALLOCA (float, nc);
+    for (int c = 0; c < nc; ++c)
+        binv[c] = (b[c] == 0.0f) ? 1.0f : 1.0f/b[c];
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "div", mul_impl, dst.spec().format,
+                          A.spec().format, dst, A, binv, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::div (ImageBuf &dst, const ImageBuf &A, float b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    b = (b == 0.0f) ? 1.0f : 1.0f/b;
+    int nc = dst.nchannels();
+    float *binv = ALLOCA (float, nc);
+    for (int c = 0;  c < nc;  ++c)
+        binv[c] = b;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "div", mul_impl, dst.spec().format,
+                          A.spec().format, dst, A, binv, roi, nthreads);
+    return ok;
+}
+
+
+
+template<class Rtype, class ABCtype>
+static bool
+mad_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, const ImageBuf &C,
+          ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(mad_impl<Rtype,ABCtype>, boost::ref(R),
+                        boost::cref(A), boost::cref(B), boost::cref(C),
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    ImageBuf::Iterator<Rtype> r (R, roi);
+    ImageBuf::ConstIterator<ABCtype> a (A, roi);
+    ImageBuf::ConstIterator<ABCtype> b (B, roi);
+    ImageBuf::ConstIterator<ABCtype> c (C, roi);
+    for ( ;  !r.done();  ++r, ++a, ++b, ++c)
+        for (int ch = roi.chbegin;  ch < roi.chend;  ++ch)
+            r[ch] = a[ch] * b[ch] + c[ch];
+    return true;
+}
+
+
+
+template<class Rtype, class Atype>
+static bool
+mad_implf (ImageBuf &R, const ImageBuf &A, const float *b, const float *c,
+          ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(mad_implf<Rtype,Atype>, boost::ref(R),
+                        boost::cref(A), b, c,
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    // Serial case
+    ImageBuf::Iterator<Rtype> r (R, roi);
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    for ( ;  !r.done();  ++r, ++a)
+        for (int ch = roi.chbegin;  ch < roi.chend;  ++ch)
+            r[ch] = a[ch] * b[ch] + c[ch];
+    return true;
+}
+
+
+
+bool
+ImageBufAlgo::mad (ImageBuf &dst, const ImageBuf &A_, const ImageBuf &B_,
+                   const ImageBuf &C_, ROI roi, int nthreads)
+{
+    const ImageBuf *A = &A_, *B = &B_, *C = &C_;
+    if (!A->initialized() || !B->initialized() || !C->initialized()) {
+        dst.error ("Uninitialized input image");
+        return false;
+    }
+
+    // To avoid the full cross-product of dst/A/B/C types, force A,B,C to
+    // all be the same data type, copying if we have to.
+    TypeDesc abc_type = type_merge (A->spec().format, B->spec().format,
+                                    C->spec().format);
+    ImageBuf Anew, Bnew, Cnew;
+    if (A->spec().format != abc_type) {
+        Anew.copy (*A, abc_type);
+        A = &Anew;
+    }
+    if (B->spec().format != abc_type) {
+        Bnew.copy (*B, abc_type);
+        B = &Bnew;
+    }
+    if (C->spec().format != abc_type) {
+        Cnew.copy (*C, abc_type);
+        C = &Cnew;
+    }
+    ASSERT (A->spec().format == B->spec().format &&
+            A->spec().format == C->spec().format);
+
+    if (! IBAprep (roi, &dst, A, B, C))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "mad", mad_impl, dst.spec().format,
+                                 abc_type, dst, *A, *B, *C, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::mad (ImageBuf &dst, const ImageBuf &A, const float *B,
+                   const float *C, ROI roi, int nthreads)
+{
+    if (!A.initialized()) {
+        dst.error ("Uninitialized input image");
+        return false;
+    }
+    if (! IBAprep (roi, &dst, &A))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "mad", mad_implf, dst.spec().format,
+                                 A.spec().format, dst, A, B, C,
+                                 roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::mad (ImageBuf &dst, const ImageBuf &A, float b,
+                   float c, ROI roi, int nthreads)
+{
+    if (!A.initialized()) {
+        dst.error ("Uninitialized input image");
+        return false;
+    }
+    if (! IBAprep (roi, &dst, &A))
+        return false;
+    std::vector<float> B (roi.chend, b);
+    std::vector<float> C (roi.chend, c);
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "mad", mad_implf, dst.spec().format,
+                                 A.spec().format, dst, A, &B[0], &C[0],
+                                 roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::invert (ImageBuf &dst, const ImageBuf &A,
+                      ROI roi, int nthreads)
+{
+    // Calculate invert as simply 1-A == A*(-1)+1
+    return mad (dst, A, -1.0, 1.0, roi, nthreads);
+}
+
+
+
+template<class Rtype, class Atype>
+static bool
+pow_impl (ImageBuf &R, const ImageBuf &A, const float *b,
+          ROI roi, int nthreads)
+{
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(pow_impl<Rtype,Atype>, boost::ref(R), boost::cref(A), b,
+                        _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
+    }
+
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r, ++a)
+        for (int c = roi.chbegin;  c < roi.chend;  ++c)
+            r[c] = pow (a[c], b[c]);
+    return true;
+}
+
+
+bool
+ImageBufAlgo::pow (ImageBuf &dst, const ImageBuf &A, const float *b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "pow", pow_impl, dst.spec().format,
+                          A.spec().format, dst, A, b, roi, nthreads);
+    return ok;
+}
+
+
+
+bool
+ImageBufAlgo::pow (ImageBuf &dst, const ImageBuf &A, float b,
+                   ROI roi, int nthreads)
+{
+    if (! IBAprep (roi, &dst, &A, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    int nc = A.nchannels();
+    float *vals = ALLOCA (float, nc);
+    for (int c = 0;  c < nc;  ++c)
+        vals[c] = b;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "pow", pow_impl, dst.spec().format,
+                          A.spec().format, dst, A, vals, roi, nthreads);
+    return ok;
+}
+
+
 
 
 
@@ -433,7 +824,8 @@ ImageBufAlgo::channel_sum (ImageBuf &dst, const ImageBuf &src,
     ROI dstroi = roi;
     dstroi.chbegin = 0;
     dstroi.chend = 1;
-    IBAprep (dstroi, &dst);
+    if (! IBAprep (dstroi, &dst))
+        return false;
 
     if (! weights) {
         float *local_weights = ALLOCA (float, roi.chend);
@@ -442,10 +834,11 @@ ImageBufAlgo::channel_sum (ImageBuf &dst, const ImageBuf &src,
         weights = &local_weights[0];
     }
 
-    OIIO_DISPATCH_TYPES2 ("channel_sum", channel_sum_,
+    bool ok;
+    OIIO_DISPATCH_TYPES2 (ok, "channel_sum", channel_sum_,
                           dst.spec().format, src.spec().format,
                           dst, src, weights, roi, nthreads);
-    return false;
+    return ok;
 }
 
 
@@ -454,8 +847,14 @@ ImageBufAlgo::channel_sum (ImageBuf &dst, const ImageBuf &src,
 inline float rangecompress (float x)
 {
     // Formula courtesy of Sony Pictures Imageworks
+#if 0    /* original coeffs -- identity transform for vals < 1 */
     const float x1 = 1.0, a = 1.2607481479644775391;
     const float b = 0.28785100579261779785, c = -1.4042005538940429688;
+#else    /* but received wisdom is that these work better */
+    const float x1 = 0.18, a = -0.54576885700225830078;
+    const float b = 0.18351669609546661377, c = 284.3577880859375;
+#endif
+
     float absx = fabsf(x);
     if (absx <= x1)
         return x;
@@ -467,8 +866,14 @@ inline float rangecompress (float x)
 inline float rangeexpand (float y)
 {
     // Formula courtesy of Sony Pictures Imageworks
+#if 0    /* original coeffs -- identity transform for vals < 1 */
     const float x1 = 1.0, a = 1.2607481479644775391;
     const float b = 0.28785100579261779785, c = -1.4042005538940429688;
+#else    /* but received wisdom is that these work better */
+    const float x1 = 0.18, a = -0.54576885700225830078;
+    const float b = 0.18351669609546661377, c = 284.3577880859375;
+#endif
+
     float absy = fabsf(y);
     if (absy <= x1)
         return y;
@@ -484,45 +889,68 @@ inline float rangeexpand (float y)
 
 
 
-template<class Rtype>
+template<class Rtype, class Atype>
 static bool
-rangecompress_ (ImageBuf &R, bool useluma, ROI roi, int nthreads)
+rangecompress_ (ImageBuf &R, const ImageBuf &A,
+                bool useluma, ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Possible multiple thread case -- recurse via parallel_image
         ImageBufAlgo::parallel_image (
-            boost::bind(rangecompress_<Rtype>, boost::ref(R), useluma,
+            boost::bind(rangecompress_<Rtype,Atype>, boost::ref(R),
+                        boost::cref(A), useluma,
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
     }
 
-    const ImageSpec &Rspec (R.spec());
-    int alpha_channel = Rspec.alpha_channel;
-    int z_channel = Rspec.z_channel;
+    const ImageSpec &Aspec (A.spec());
+    int alpha_channel = Aspec.alpha_channel;
+    int z_channel = Aspec.z_channel;
     if (roi.nchannels() < 3 ||
         (alpha_channel >= roi.chbegin && alpha_channel < roi.chbegin+3) ||
         (z_channel >= roi.chbegin && z_channel < roi.chbegin+3)) {
         useluma = false;  // No way to use luma
     }
 
-    ImageBuf::Iterator<Rtype> r (R, roi);
-    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
-        if (useluma) {
-            float luma = 0.21264f * r[roi.chbegin] + 0.71517f * r[roi.chbegin+1] + 0.07219f * r[roi.chbegin+2];
-            if (fabsf(luma) <= 1.0f)
-                continue;  // Not HDR, no range compression needed
-            float scale = rangecompress (luma) / luma;
-            for (int c = roi.chbegin; c < roi.chend; ++c) {
-                if (c == alpha_channel || c == z_channel)
-                    continue;
-                r[c] = r[c] * scale;
+    if (&R == &A) {
+        // Special case: operate in-place
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
+            if (useluma) {
+                float luma = 0.21264f * r[roi.chbegin] + 0.71517f * r[roi.chbegin+1] + 0.07219f * r[roi.chbegin+2];
+                float scale = luma > 0.0f ? rangecompress (luma) / luma : 0.0f;
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        continue;
+                    r[c] = r[c] * scale;
+                }
+            } else {
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        continue;
+                    r[c] = rangecompress (r[c]);
+                }
             }
-        } else {
-            for (int c = roi.chbegin; c < roi.chend; ++c) {
-                if (c == alpha_channel || c == z_channel)
-                    continue;
-                r[c] = rangecompress (r[c]);
+        }
+    } else {
+        ImageBuf::ConstIterator<Atype> a (A, roi);
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r, ++a) {
+            if (useluma) {
+                float luma = 0.21264f * a[roi.chbegin] + 0.71517f * a[roi.chbegin+1] + 0.07219f * a[roi.chbegin+2];
+                float scale = luma > 0.0f ? rangecompress (luma) / luma : 0.0f;
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        r[c] = a[c];
+                    else
+                        r[c] = a[c] * scale;
+                }
+            } else {
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        r[c] = a[c];
+                    else
+                        r[c] = rangecompress (a[c]);
+                }
             }
         }
     }
@@ -531,45 +959,68 @@ rangecompress_ (ImageBuf &R, bool useluma, ROI roi, int nthreads)
 
 
 
-template<class Rtype>
+template<class Rtype, class Atype>
 static bool
-rangeexpand_ (ImageBuf &R, bool useluma, ROI roi, int nthreads)
+rangeexpand_ (ImageBuf &R, const ImageBuf &A,
+              bool useluma, ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Possible multiple thread case -- recurse via parallel_image
         ImageBufAlgo::parallel_image (
-            boost::bind(rangeexpand_<Rtype>, boost::ref(R), useluma,
+            boost::bind(rangeexpand_<Rtype,Atype>, boost::ref(R), 
+                        boost::cref(A), useluma,
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
     }
 
-    const ImageSpec &Rspec (R.spec());
-    int alpha_channel = Rspec.alpha_channel;
-    int z_channel = Rspec.z_channel;
+    const ImageSpec &Aspec (A.spec());
+    int alpha_channel = Aspec.alpha_channel;
+    int z_channel = Aspec.z_channel;
     if (roi.nchannels() < 3 ||
         (alpha_channel >= roi.chbegin && alpha_channel < roi.chbegin+3) ||
         (z_channel >= roi.chbegin && z_channel < roi.chbegin+3)) {
         useluma = false;  // No way to use luma
     }
 
-    ImageBuf::Iterator<Rtype> r (R, roi);
-    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
-        if (useluma) {
-            float luma = 0.21264f * r[roi.chbegin] + 0.71517f * r[roi.chbegin+1] + 0.07219f * r[roi.chbegin+2];
-            if (fabsf(luma) <= 1.0f)
-                continue;  // Not HDR, no range compression needed
-            float scale = rangeexpand (luma) / luma;
-            for (int c = roi.chbegin; c < roi.chend; ++c) {
-                if (c == alpha_channel || c == z_channel)
-                    continue;
-                r[c] = r[c] * scale;
+    if (&R == &A) {
+        // Special case: operate in-place
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
+            if (useluma) {
+                float luma = 0.21264f * r[roi.chbegin] + 0.71517f * r[roi.chbegin+1] + 0.07219f * r[roi.chbegin+2];
+                float scale = luma > 0.0f ? rangeexpand (luma) / luma : 0.0f;
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        continue;
+                    r[c] = r[c] * scale;
+                }
+            } else {
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        continue;
+                    r[c] = rangeexpand (r[c]);
+                }
             }
-        } else {
-            for (int c = roi.chbegin; c < roi.chend; ++c) {
-                if (c == alpha_channel || c == z_channel)
-                    continue;
-                r[c] = rangeexpand (r[c]);
+        }
+    } else {
+        ImageBuf::ConstIterator<Atype> a (A, roi);
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r, ++a) {
+            if (useluma) {
+                float luma = 0.21264f * a[roi.chbegin] + 0.71517f * a[roi.chbegin+1] + 0.07219f * a[roi.chbegin+2];
+                float scale = luma > 0.0f ? rangeexpand (luma) / luma : 0.0f;
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        r[c] = a[c];
+                    else
+                        r[c] = a[c] * scale;
+                }
+            } else {
+                for (int c = roi.chbegin; c < roi.chend; ++c) {
+                    if (c == alpha_channel || c == z_channel)
+                        r[c] = a[c];
+                    else
+                        r[c] = rangeexpand (a[c]);
+                }
             }
         }
     }
@@ -579,79 +1030,75 @@ rangeexpand_ (ImageBuf &R, bool useluma, ROI roi, int nthreads)
 
 
 bool
-ImageBufAlgo::rangecompress (ImageBuf &dst, bool useluma,
-                             ROI roi, int nthreads)
+ImageBufAlgo::rangecompress (ImageBuf &dst, const ImageBuf &src,
+                             bool useluma, ROI roi, int nthreads)
 {
-    // If the data type can't handle extended range, this is a no-op
-    int basetype = dst.spec().format.basetype;
-    if (basetype != TypeDesc::FLOAT && basetype != TypeDesc::HALF &&
-        basetype != TypeDesc::DOUBLE)
-        return true;
-
-    IBAprep (roi, &dst);
-    switch (basetype) {
-    case TypeDesc::FLOAT:
-        return rangecompress_<float> (dst, useluma, roi, nthreads);
-    case TypeDesc::HALF:
-        return rangecompress_<half> (dst, useluma, roi, nthreads);
-    case TypeDesc::DOUBLE:
-        return rangecompress_<double> (dst, useluma, roi, nthreads);
-    default:
-        return true;
-    }
-    return true;
+    if (! IBAprep (roi, &dst, &src, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "rangecompress", rangecompress_,
+                          dst.spec().format, src.spec().format,
+                          dst, src, useluma, roi, nthreads);
+    return ok;
 }
 
 
 
 bool
-ImageBufAlgo::rangeexpand (ImageBuf &dst, bool useluma,
-                           ROI roi, int nthreads)
+ImageBufAlgo::rangeexpand (ImageBuf &dst, const ImageBuf &src,
+                           bool useluma, ROI roi, int nthreads)
 {
-    // If the data type can't handle extended range, this is a no-op
-    int basetype = dst.spec().format.basetype;
-    if (basetype != TypeDesc::FLOAT && basetype != TypeDesc::HALF &&
-        basetype != TypeDesc::DOUBLE)
-        return true;
-
-    IBAprep (roi, &dst);
-    switch (basetype) {
-    case TypeDesc::FLOAT:
-        return rangeexpand_<float> (dst, useluma, roi, nthreads);
-    case TypeDesc::HALF:
-        return rangeexpand_<half> (dst, useluma, roi, nthreads);
-    case TypeDesc::DOUBLE:
-        return rangeexpand_<double> (dst, useluma, roi, nthreads);
-    default:
-        return true;
-    }
-    return true;
+    if (! IBAprep (roi, &dst, &src, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "rangeexpand", rangeexpand_,
+                          dst.spec().format, src.spec().format,
+                          dst, src, useluma, roi, nthreads);
+    return ok;
 }
 
 
 
-template<class Rtype>
+template<class Rtype, class Atype>
 static bool
-unpremult_ (ImageBuf &R, ROI roi, int nthreads)
+unpremult_ (ImageBuf &R, const ImageBuf &A, ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Possible multiple thread case -- recurse via parallel_image
         ImageBufAlgo::parallel_image (
-            boost::bind(unpremult_<Rtype>, boost::ref(R),
+            boost::bind(unpremult_<Rtype,Atype>, boost::ref(R), boost::cref(A),
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
     }
 
-    int alpha_channel = R.spec().alpha_channel;
-    int z_channel = R.spec().z_channel;
-    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
-        float alpha = r[alpha_channel];
-        if (alpha == 0.0f || alpha == 1.0f)
-            continue;
-        for (int c = roi.chbegin;  c < roi.chend;  ++c)
-            if (c != alpha_channel && c != z_channel)
-                r[c] = r[c] / alpha;
+    int alpha_channel = A.spec().alpha_channel;
+    int z_channel = A.spec().z_channel;
+    if (&R == &A) {
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
+            float alpha = r[alpha_channel];
+            if (alpha == 0.0f || alpha == 1.0f)
+                continue;
+            for (int c = roi.chbegin;  c < roi.chend;  ++c)
+                if (c != alpha_channel && c != z_channel)
+                    r[c] = r[c] / alpha;
+        }
+    } else {
+        ImageBuf::ConstIterator<Atype> a (A, roi);
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r, ++a) {
+            float alpha = a[alpha_channel];
+            if (alpha == 0.0f || alpha == 1.0f) {
+                for (int c = roi.chbegin;  c < roi.chend;  ++c)
+                    r[c] = a[c];
+                continue;
+            }
+            for (int c = roi.chbegin;  c < roi.chend;  ++c)
+                if (c != alpha_channel && c != z_channel)
+                    r[c] = a[c] / alpha;
+                else
+                    r[c] = a[c];
+        }
+
     }
     return true;
 }
@@ -659,41 +1106,60 @@ unpremult_ (ImageBuf &R, ROI roi, int nthreads)
 
 
 bool
-ImageBufAlgo::unpremult (ImageBuf &dst,  ROI roi, int nthreads)
+ImageBufAlgo::unpremult (ImageBuf &dst, const ImageBuf &src,
+                         ROI roi, int nthreads)
 {
-    if (dst.spec().alpha_channel < 0)
+    if (! IBAprep (roi, &dst, &src, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    if (src.spec().alpha_channel < 0) {
+        if (&dst != &src)
+            return paste (dst, src.spec().x, src.spec().y, src.spec().z,
+                          roi.chbegin, src, roi, nthreads);
         return true;
-
-    IBAprep (roi, &dst);
-    OIIO_DISPATCH_TYPES ("unpremult", unpremult_, dst.spec().format,
-                         dst, roi, nthreads);
-    return true;
+    }
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "unpremult", unpremult_, dst.spec().format,
+                          src.spec().format, dst, src, roi, nthreads);
+    return ok;
 }
 
 
 
-template<class Rtype>
+template<class Rtype, class Atype>
 static bool
-premult_ (ImageBuf &R, ROI roi, int nthreads)
+premult_ (ImageBuf &R, const ImageBuf &A, ROI roi, int nthreads)
 {
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Possible multiple thread case -- recurse via parallel_image
         ImageBufAlgo::parallel_image (
-            boost::bind(premult_<Rtype>, boost::ref(R),
+            boost::bind(premult_<Rtype,Atype>, boost::ref(R), boost::cref(A),
                         _1 /*roi*/, 1 /*nthreads*/),
             roi, nthreads);
         return true;
     }
 
-    int alpha_channel = R.spec().alpha_channel;
-    int z_channel = R.spec().z_channel;
-    for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
-        float alpha = r[alpha_channel];
-        if (alpha == 1.0f)
-            continue;
-        for (int c = roi.chbegin;  c < roi.chend;  ++c)
-            if (c != alpha_channel && c != z_channel)
-                r[c] = r[c] * alpha;
+    int alpha_channel = A.spec().alpha_channel;
+    int z_channel = A.spec().z_channel;
+        if (&R == &A) {
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r) {
+            float alpha = r[alpha_channel];
+            if (alpha == 1.0f)
+                continue;
+            for (int c = roi.chbegin;  c < roi.chend;  ++c)
+                if (c != alpha_channel && c != z_channel)
+                    r[c] = r[c] * alpha;
+        }
+    } else {
+        ImageBuf::ConstIterator<Atype> a (A, roi);
+        for (ImageBuf::Iterator<Rtype> r (R, roi);  !r.done();  ++r, ++a) {
+            float alpha = a[alpha_channel];
+            for (int c = roi.chbegin;  c < roi.chend;  ++c)
+                if (c != alpha_channel && c != z_channel)
+                    r[c] = a[c] * alpha;
+                else
+                    r[c] = a[c];
+        }
+
     }
     return true;
 }
@@ -701,17 +1167,22 @@ premult_ (ImageBuf &R, ROI roi, int nthreads)
 
 
 bool
-ImageBufAlgo::premult (ImageBuf &dst, ROI roi, int nthreads)
+ImageBufAlgo::premult (ImageBuf &dst, const ImageBuf &src,
+                       ROI roi, int nthreads)
 {
-    if (dst.spec().alpha_channel < 0)
+    if (! IBAprep (roi, &dst, &src, IBAprep_CLAMP_MUTUAL_NCHANNELS))
+        return false;
+    if (src.spec().alpha_channel < 0) {
+        if (&dst != &src)
+            return paste (dst, src.spec().x, src.spec().y, src.spec().z,
+                          roi.chbegin, src, roi, nthreads);
         return true;
-
-    IBAprep (roi, &dst);
-    OIIO_DISPATCH_TYPES ("premult", premult_, dst.spec().format,
-                         dst, roi, nthreads);
-    return true;
+    }
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES2 (ok, "premult", premult_, dst.spec().format,
+                          src.spec().format, dst, src, roi, nthreads);
+    return ok;
 }
-
 
 
 
@@ -727,14 +1198,6 @@ template<typename T>
 bool fixNonFinite_ (ImageBuf &dst, ImageBufAlgo::NonFiniteFixMode mode,
                     int *pixelsFixed, ROI roi, int nthreads)
 {
-    if (mode != ImageBufAlgo::NONFINITE_NONE &&
-        mode != ImageBufAlgo::NONFINITE_BLACK &&
-        mode != ImageBufAlgo::NONFINITE_BOX3) {
-        // Something went wrong
-        dst.error ("fixNonFinite: unknown repair mode");
-        return false;
-    }
-
     if (nthreads != 1 && roi.npixels() >= 1000) {
         // Lots of pixels and request for multi threads? Parallelize.
         ImageBufAlgo::parallel_image (
@@ -819,55 +1282,46 @@ bool fixNonFinite_ (ImageBuf &dst, ImageBufAlgo::NonFiniteFixMode mode,
 
 /// Fix all non-finite pixels (nan/inf) using the specified approach
 bool
-ImageBufAlgo::fixNonFinite (ImageBuf &src, 
+ImageBufAlgo::fixNonFinite (ImageBuf &dst, const ImageBuf &src,
                             NonFiniteFixMode mode, int *pixelsFixed,
                             ROI roi, int nthreads)
 {
-    // If no ROI is defined, use the data window of src.
-    if (! roi.defined())
-        roi = get_roi(src.spec());
-    roi.chend = std::min (roi.chend, src.nchannels());
+    if (mode != ImageBufAlgo::NONFINITE_NONE &&
+        mode != ImageBufAlgo::NONFINITE_BLACK &&
+        mode != ImageBufAlgo::NONFINITE_BOX3) {
+        // Something went wrong
+        dst.error ("fixNonFinite: unknown repair mode");
+        return false;
+    }
+
+    if (! IBAprep (roi, &dst, &src))
+        return false;
 
     // Initialize
     if (pixelsFixed)
         *pixelsFixed = 0;
 
+    // Start by copying dst to src, if they aren't the same image
+    if (&dst != &src)
+        ImageBufAlgo::paste (dst, roi.xbegin, roi.ybegin, roi.zbegin, 0,
+                             src, roi, nthreads);
+
     switch (src.spec().format.basetype) {
     case TypeDesc::FLOAT :
-        return fixNonFinite_<float> (src, mode, pixelsFixed, roi, nthreads);
+        return fixNonFinite_<float> (dst, mode, pixelsFixed, roi, nthreads);
     case TypeDesc::HALF  :
-        return fixNonFinite_<half> (src, mode, pixelsFixed, roi, nthreads);
+        return fixNonFinite_<half> (dst, mode, pixelsFixed, roi, nthreads);
     case TypeDesc::DOUBLE:
-        return fixNonFinite_<double> (src, mode, pixelsFixed, roi, nthreads);
+        return fixNonFinite_<double> (dst, mode, pixelsFixed, roi, nthreads);
     default:
         // All other format types aren't capable of having nonfinite
-        // pixel values.
+        // pixel values, so the copy was enough.
         return true;
     }
 }
 
 
 
-// DEPRECATED 2-argument version
-bool
-ImageBufAlgo::fixNonFinite (ImageBuf &dst, const ImageBuf &src,
-                            NonFiniteFixMode mode, int *pixelsFixed)
-{
-    ROI roi;
-    IBAprep (roi, &dst, &src);
-    if (dst.nchannels() != src.nchannels()) {
-        dst.error ("channel number mismatch: %d vs. %d", 
-                   dst.spec().nchannels, src.spec().nchannels);
-        return false;
-    }
-    if ((const ImageBuf *)&dst != &src)
-        if (! dst.copy (src))
-            return false;
-    return fixNonFinite (dst, mode, pixelsFixed, roi);
-}
-
-
-namespace {   // anonymous namespace
 
 static bool
 decode_over_channels (const ImageBuf &R, int &nchannels, 
@@ -904,16 +1358,20 @@ decode_over_channels (const ImageBuf &R, int &nchannels,
 // Fully type-specialized version of over.
 template<class Rtype, class Atype, class Btype>
 static bool
-over_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
-           bool zcomp=false, bool z_zeroisinf=false)
+over_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B,
+           bool zcomp, bool z_zeroisinf, ROI roi, int nthreads)
 {
-    if (R.spec().format != BaseTypeFromC<Rtype>::value ||
-        A.spec().format != BaseTypeFromC<Atype>::value ||
-        B.spec().format != BaseTypeFromC<Btype>::value) {
-        R.error ("Unsupported pixel data format combination '%s / %s / %s'",
-                 R.spec().format, A.spec().format, B.spec().format);
-        return false;   // double check that types match
+    if (nthreads != 1 && roi.npixels() >= 1000) {
+        // Possible multiple thread case -- recurse via parallel_image
+        ImageBufAlgo::parallel_image (
+            boost::bind(over_impl<Rtype,Atype,Btype>,
+                        boost::ref(R), boost::cref(A), boost::cref(B),
+                        zcomp, z_zeroisinf, _1 /*roi*/, 1 /*nthreads*/),
+            roi, nthreads);
+        return true;
     }
+
+    // Serial case...
 
     // It's already guaranteed that R, A, and B have matching channel
     // ordering, and have an alpha channel.  So just decode one.
@@ -922,34 +1380,10 @@ over_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
                           z_channel, ncolor_channels);
     bool has_z = (z_channel >= 0);
 
-    ImageBuf::ConstIterator<Atype, float> a (A);
-    ImageBuf::ConstIterator<Btype, float> b (B);
-    ImageBuf::Iterator<Rtype, float> r (R, roi);
-    for ( ; ! r.done(); r++) {
-        a.pos (r.x(), r.y(), r.z());
-        b.pos (r.x(), r.y(), r.z());
-
-        if (! a.exists()) {
-            if (! b.exists()) {
-                // a and b outside their data window -- "empty" pixels
-                for (int c = 0; c < nchannels; c++)
-                    r[c] = 0.0f;
-            } else {
-                // a doesn't exist, but b does -- copy B
-                for (int c = 0; c < nchannels; ++c)
-                    r[c] = b[c];
-            }
-            continue;
-        }
-
-        if (! b.exists()) {
-            // a exists, b does not -- copy A
-            for (int c = 0; c < nchannels; ++c)
-                r[c] = a[c];
-            continue;
-        }
-
-        // At this point, a and b exist.
+    ImageBuf::ConstIterator<Atype> a (A, roi);
+    ImageBuf::ConstIterator<Btype> b (B, roi);
+    ImageBuf::Iterator<Rtype> r (R, roi);
+    for ( ; ! r.done(); ++r, ++a, ++b) {
         float az = 0.0f, bz = 0.0f;
         bool a_is_closer = true;  // will remain true if !zcomp
         if (zcomp && has_z) {
@@ -965,7 +1399,7 @@ over_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
             // A over B
             float alpha = clamp (a[alpha_channel], 0.0f, 1.0f);
             float one_minus_alpha = 1.0f - alpha;
-            for (int c = 0;  c < nchannels;  c++)
+            for (int c = roi.chbegin;  c < roi.chend;  c++)
                 r[c] = a[c] + one_minus_alpha * b[c];
             if (has_z)
                 r[z_channel] = (alpha != 0.0) ? a[z_channel] : b[z_channel];
@@ -973,7 +1407,7 @@ over_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
             // B over A -- because we're doing a Z composite
             float alpha = clamp (b[alpha_channel], 0.0f, 1.0f);
             float one_minus_alpha = 1.0f - alpha;
-            for (int c = 0;  c < nchannels;  c++)
+            for (int c = roi.chbegin;  c < roi.chend;  c++)
                 r[c] = b[c] + one_minus_alpha * a[c];
             r[z_channel] = (alpha != 0.0) ? b[z_channel] : a[z_channel];
         }
@@ -981,168 +1415,37 @@ over_impl (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
     return true;
 }
 
-}    // anonymous namespace
 
 
 bool
-ImageBufAlgo::over (ImageBuf &R, const ImageBuf &A, const ImageBuf &B, ROI roi,
-                    int nthreads)
+ImageBufAlgo::over (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
+                    ROI roi, int nthreads)
 {
-    const ImageSpec &specR = R.spec();
-    const ImageSpec &specA = A.spec();
-    const ImageSpec &specB = B.spec();
-
-    int nchannels_R, nchannels_A, nchannels_B;
-    int alpha_R, alpha_A, alpha_B;
-    int z_R, z_A, z_B;
-    int colors_R, colors_A, colors_B;
-    bool initialized_R = decode_over_channels (R, nchannels_R, alpha_R,
-                                               z_R, colors_R);
-    bool initialized_A = decode_over_channels (A, nchannels_A, alpha_A,
-                                               z_A, colors_A);
-    bool initialized_B = decode_over_channels (B, nchannels_B, alpha_B,
-                                               z_B, colors_B);
-
-    if (! initialized_A || ! initialized_B) {
-        R.error ("Can't 'over' uninitialized images");
+    if (! IBAprep (roi, &dst, &A, &B, NULL,
+                   IBAprep_REQUIRE_ALPHA | IBAprep_REQUIRE_SAME_NCHANNELS))
         return false;
-    }
-
-    // Fail if the input images don't have an alpha channel.
-    if (alpha_A < 0 || alpha_B < 0 || (initialized_R && alpha_R < 0)) {
-        R.error ("'over' requires alpha channels");
-        return false;
-    }
-    // Fail for mismatched channel counts
-    if (colors_A != colors_B || colors_A < 1) {
-        R.error ("Can't 'over' images with mismatched color channel counts (%d vs %d)",
-                 colors_A, colors_B);
-        return false;
-    }
-    // Fail for unaligned alpha or z channels
-    if (alpha_A != alpha_B || z_A != z_B ||
-        (initialized_R && alpha_R != alpha_A) ||
-        (initialized_R && z_R != z_A)) {
-        R.error ("Can't 'over' images with mismatched channel order",
-                 colors_A, colors_B);
-        return false;
-    }
-    
-    // At present, this operation only supports ImageBuf's containing
-    // float pixel data.
-    if ((initialized_R && specR.format != TypeDesc::TypeFloat) ||
-        specA.format != TypeDesc::TypeFloat ||
-        specB.format != TypeDesc::TypeFloat) {
-        R.error ("Unsupported pixel data format combination '%s = %s over %s'",
-                 specR.format, specA.format, specB.format);
-        return false;
-    }
-
-    // Uninitialized R -> size it to the union of A and B.
-    if (! initialized_R) {
-        ImageSpec newspec = specA;
-        set_roi (newspec, roi_union (get_roi(specA), get_roi(specB)));
-        R.reset ("over", newspec);
-    }
-
-    // Specified ROI -> use it. Unspecified ROI -> initialize from R.
-    if (! roi.defined())
-        roi = get_roi (R.spec());
-
-    parallel_image (boost::bind (over_impl<float,float,float>, boost::ref(R),
-                                 boost::cref(A), boost::cref(B), _1, false, false),
-                    roi, nthreads);
-    return ! R.has_error();
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "over", over_impl, dst.spec().format,
+                                 A.spec().format, B.spec().format,
+                                 dst, A, B, false, false, roi, nthreads);
+    return ok && ! dst.has_error();
 }
 
 
 
 bool
-ImageBufAlgo::zover (ImageBuf &R, const ImageBuf &A, const ImageBuf &B,
+ImageBufAlgo::zover (ImageBuf &dst, const ImageBuf &A, const ImageBuf &B,
                      bool z_zeroisinf, ROI roi, int nthreads)
 {
-    const ImageSpec &specR = R.spec();
-    const ImageSpec &specA = A.spec();
-    const ImageSpec &specB = B.spec();
-
-    int nchannels_R, nchannels_A, nchannels_B;
-    int alpha_R, alpha_A, alpha_B;
-    int z_R, z_A, z_B;
-    int colors_R, colors_A, colors_B;
-    bool initialized_R = decode_over_channels (R, nchannels_R, alpha_R,
-                                               z_R, colors_R);
-    bool initialized_A = decode_over_channels (A, nchannels_A, alpha_A,
-                                               z_A, colors_A);
-    bool initialized_B = decode_over_channels (B, nchannels_B, alpha_B,
-                                               z_B, colors_B);
-
-    if (! initialized_A || ! initialized_B) {
-        R.error ("Can't 'zover' uninitialized images");
+    if (! IBAprep (roi, &dst, &A, &B, NULL,
+                   IBAprep_REQUIRE_ALPHA | IBAprep_REQUIRE_Z |
+                   IBAprep_REQUIRE_SAME_NCHANNELS))
         return false;
-    }
-    // Fail if the input images don't have a Z channel.
-    if (z_A < 0 || z_B < 0 || (initialized_R && z_R < 0)) {
-        R.error ("'zover' requires Z channels");
-        return false;
-    }
-    // Fail if the input images don't have an alpha channel.
-    if (alpha_A < 0 || alpha_B < 0 || (initialized_R && alpha_R < 0)) {
-        R.error ("'zover' requires alpha channels");
-        return false;
-    }
-    // Fail for mismatched channel counts
-    if (colors_A != colors_B || colors_A < 1) {
-        R.error ("Can't 'zover' images with mismatched color channel counts (%d vs %d)",
-                 colors_A, colors_B);
-        return false;
-    }
-    // Fail for unaligned alpha or z channels
-    if (alpha_A != alpha_B || z_A != z_B ||
-        (initialized_R && alpha_R != alpha_A) ||
-        (initialized_R && z_R != z_A)) {
-        R.error ("Can't 'zover' images with mismatched channel order",
-                 colors_A, colors_B);
-        return false;
-    }
-    
-    // At present, this operation only supports ImageBuf's containing
-    // float pixel data.
-    if ((initialized_R && specR.format != TypeDesc::TypeFloat) ||
-        specA.format != TypeDesc::TypeFloat ||
-        specB.format != TypeDesc::TypeFloat) {
-        R.error ("Unsupported pixel data format combination '%s = %s zover %s'",
-                 specR.format, specA.format, specB.format);
-        return false;
-    }
-
-    // Uninitialized R -> size it to the union of A and B.
-    if (! initialized_R) {
-        ImageSpec newspec = specA;
-        set_roi (newspec, roi_union (get_roi(specA), get_roi(specB)));
-        R.reset ("zover", newspec);
-    }
-
-    // Specified ROI -> use it. Unspecified ROI -> initialize from R.
-    if (! roi.defined())
-        roi = get_roi (R.spec());
-
-    parallel_image (boost::bind (over_impl<float,float,float>, boost::ref(R),
-                                 boost::cref(A), boost::cref(B), _1,
-                                 true, z_zeroisinf),
-                    roi, nthreads);
-    return ! R.has_error();
-}
-
-
-
-bool
-ImageBufAlgo::zover (ImageBuf &R, const ImageBuf &A, const ImageBuf &B,
-                     ROI roi, int nthreads)
-{
-    // DEPRECATED version -- just call the new version.  This exists to 
-    // avoid breaking link compatibility.  Eventually remove it at the
-    // next major release.
-    return zover (R, A, B, false, roi, nthreads);
+    bool ok;
+    OIIO_DISPATCH_COMMON_TYPES3 (ok, "zover", over_impl, dst.spec().format,
+                                 A.spec().format, B.spec().format,
+                                 dst, A, B, true, z_zeroisinf, roi, nthreads);
+    return ok && ! dst.has_error();
 }
 
 

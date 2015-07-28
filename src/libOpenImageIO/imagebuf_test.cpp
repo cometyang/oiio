@@ -29,11 +29,10 @@
 */
 
 
-#include "imageio.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "sysutil.h"
-#include "unittest.h"
+#include <OpenImageIO/imageio.h>
+#include <OpenImageIO/imagebuf.h>
+#include <OpenImageIO/imagebufalgo.h>
+#include <OpenImageIO/unittest.h>
 
 #include <iostream>
 
@@ -82,7 +81,7 @@ void iterator_read_test ()
         { {0,3,12}, {1,3,13}, {2,3,14}, {3,3,15} }
     };
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec, buf);
+    ImageBuf A (spec, buf);
 
     ITERATOR p (A);
     OIIO_CHECK_EQUAL (p[0], 0.0f);
@@ -132,7 +131,7 @@ void iterator_wrap_test (ImageBuf::WrapMode wrap, std::string wrapname)
         { {0,3,12}, {1,3,13}, {2,3,14}, {3,3,15} }
     };
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec, buf);
+    ImageBuf A (spec, buf);
 
     std::cout << "iterator_wrap_test " << wrapname << ":";
     int i = 0;
@@ -196,17 +195,16 @@ void ImageBuf_test_appbuffer ()
         { 0, 0, 0, 0, 0, 0, 0, 0 }
     };
     ImageSpec spec (WIDTH, HEIGHT, CHANNELS, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec, buf);
+    ImageBuf A (spec, buf);
 
     // Make sure A now points to the buffer
     OIIO_CHECK_EQUAL ((void *)A.pixeladdr (0, 0, 0), (void *)buf);
 
     // write it
-    A.save ("A.tif");
+    A.write ("A.tif");
 
     // Read it back and make sure it matches the original
     ImageBuf B ("A.tif");
-    B.read ();
     for (int y = 0;  y < HEIGHT;  ++y)
         for (int x = 0;  x < WIDTH;  ++x)
             OIIO_CHECK_EQUAL (A.getchannel (x, y, 0, 0),
@@ -234,7 +232,7 @@ void histogram_computation_test ()
 
     // Create input image with three regions with different pixel values.
     ImageSpec spec (INPUT_WIDTH, INPUT_HEIGHT, 1, TypeDesc::FLOAT);
-    ImageBuf A ("A", spec);
+    ImageBuf A (spec);
 
     float value[] = {0.2f};
     ImageBufAlgo::fill (A, value, ROI(0, INPUT_WIDTH, 0, 8));
@@ -263,12 +261,77 @@ void histogram_computation_test ()
 
 
 
+void test_open_with_config ()
+{
+    // N.B. This function must run after ImageBuf_test_appbuffer, which
+    // writes "A.tif".
+    ImageCache *ic = ImageCache::create(false);
+    ImageSpec config;
+    config.attribute ("oiio:DebugOpenConfig!", 1);
+    ImageBuf A ("A.tif", 0, 0, ic, &config);
+    OIIO_CHECK_EQUAL (A.spec().get_int_attribute("oiio:DebugOpenConfig!",0), 42);
+    ic->destroy (ic);
+}
+
+
+
+void test_empty_iterator ()
+{
+    // Ensure that ImageBuf iterators over empty ROIs immediately appear
+    // done
+    ImageBuf A (ImageSpec (64, 64, 3, TypeDesc::FLOAT));
+    ROI roi (10, 10, 20, 40, 0, 1);
+    for (ImageBuf::Iterator<float> p (A, roi);  ! p.done();  ++p) {
+        std::cout << "p is " << p.x() << ' ' << p.y() << ' ' << p.z() << "\n";
+        OIIO_CHECK_ASSERT (0 && "should never execute this loop body");
+    }
+}
+
+
+
+void
+print (const ImageBuf &A)
+{
+    ASSERT (A.spec().format == TypeDesc::FLOAT);
+    for (ImageBuf::ConstIterator<float> p (A);  ! p.done();  ++p) {
+        std::cout << "   @" << p.x() << ',' << p.y() << "=(";
+        for (int c = 0; c < A.nchannels(); ++c)
+            std::cout << (c ? "," : "") << p[c];
+        std::cout << ')' << (p.x() == A.xmax() ? "\n" : "");
+    }
+    std::cout << "\n";
+}
+
+
+
+void
+test_set_get_pixels ()
+{
+    std::cout << "\nTesting set_pixels, get_pixels:\n";
+    const int nchans = 3;
+    ImageBuf A (ImageSpec (4, 4, nchans, TypeDesc::FLOAT));
+    ImageBufAlgo::zero (A);
+    std::cout << " Cleared:\n";
+    print (A);
+    float newdata[2*2*nchans] = { 1,2,3,  4,5,6,
+                                  7,8,9,  10,11,12 };
+    A.set_pixels (ROI(1,3,1,3), TypeDesc::FLOAT, newdata);
+    std::cout << " After set:\n";
+    print (A);
+    float retrieved[2*2*nchans] = { 9,9,9, 9,9,9, 9,9,9, 9,9,9 };
+    A.get_pixels (1, 3, 1, 3, 0, 1, TypeDesc::FLOAT, retrieved);
+    OIIO_CHECK_ASSERT (0 == memcmp (retrieved, newdata, 2*2*nchans));
+}
+
+
+
 int
 main (int argc, char **argv)
 {
     test_wrapmodes ();
 
     // Lots of tests related to ImageBuf::Iterator
+    test_empty_iterator ();
     iterator_read_test<ImageBuf::ConstIterator<float> > ();
     iterator_read_test<ImageBuf::Iterator<float> > ();
 
@@ -279,6 +342,9 @@ main (int argc, char **argv)
 
     ImageBuf_test_appbuffer ();
     histogram_computation_test ();
+    test_open_with_config ();
+
+    test_set_get_pixels ();
 
     return unit_test_failures;
 }

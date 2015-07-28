@@ -37,12 +37,11 @@
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
 
-#include "dassert.h"
-#include "plugin.h"
-#include "strutil.h"
-#include "filesystem.h"
-
-#include "imageio.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/plugin.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/imageio.h"
 #include "imageio_pvt.h"
 
 
@@ -212,8 +211,10 @@ catalog_plugin (const std::string &format_name,
     PLUGENTRY (cineon);
     PLUGENTRY (dds);
     PLUGENTRY (dpx);
+    PLUGENTRY (ffmpeg);
     PLUGENTRY (field3d);
     PLUGENTRY (fits);
+    PLUGENTRY (gif);
     PLUGENTRY (hdr);
     PLUGENTRY (ico);
     PLUGENTRY (iff);
@@ -224,6 +225,7 @@ catalog_plugin (const std::string &format_name,
     PLUGENTRY (pnm);
     PLUGENTRY (psd);
     PLUGENTRY (ptex);
+    PLUGENTRY (raw);
     PLUGENTRY (rla);
     PLUGENTRY (sgi);
     PLUGENTRY (socket);
@@ -259,10 +261,16 @@ catalog_builtin_plugins ()
     DECLAREPLUG (cineon);
     DECLAREPLUG (dds);
     DECLAREPLUG (dpx);
+#ifdef USE_FFMPEG
+    DECLAREPLUG (ffmpeg);
+#endif
 #ifdef USE_FIELD3D
     DECLAREPLUG (field3d);
 #endif
     DECLAREPLUG (fits);
+#ifdef USE_GIF
+    DECLAREPLUG (gif);
+#endif
     DECLAREPLUG (hdr);
     DECLAREPLUG (ico);
     DECLAREPLUG (iff);
@@ -275,6 +283,9 @@ catalog_builtin_plugins ()
     DECLAREPLUG (pnm);
     DECLAREPLUG (psd);
     DECLAREPLUG (ptex);
+#ifdef USE_LIBRAW
+    DECLAREPLUG (raw);
+#endif
     DECLAREPLUG (rla);
     DECLAREPLUG (sgi);
 #ifdef USE_BOOST_ASIO
@@ -294,6 +305,25 @@ catalog_builtin_plugins ()
 
 
 
+static void
+append_if_env_exists (std::string &searchpath, const char *env,
+                      bool prepend=false)
+{
+    const char *path = getenv (env);
+    if (path && *path) {
+        std::string newpath = path;
+        if (searchpath.length()) {
+            if (prepend)
+                newpath = newpath + ':' + searchpath;
+            else
+                newpath = searchpath + ':' + newpath;
+        }
+        searchpath = newpath;
+    }
+}
+
+
+
 /// Look at ALL imageio plugins in the searchpath and add them to the
 /// catalog.  This routine is not reentrant and should only be called
 /// by a routine that is holding a lock on imageio_mutex.
@@ -302,13 +332,13 @@ pvt::catalog_all_plugins (std::string searchpath)
 {
     catalog_builtin_plugins ();
 
-    const char *oiio_library_path = getenv ("OIIO_LIBRARY_PATH");
-    if (oiio_library_path && *oiio_library_path) {
-        std::string newpath = oiio_library_path;
-        if (searchpath.length())
-            newpath = newpath + ':' + searchpath;
-        searchpath = newpath;
-    }
+    append_if_env_exists (searchpath, "OIIO_LIBRARY_PATH", true);
+#ifdef __APPLE__
+    append_if_env_exists (searchpath, "DYLD_LIBRARY_PATH");
+#endif
+#if defined(__linux__) || defined(__FreeBSD__)
+    append_if_env_exists (searchpath, "LD_LIBRARY_PATH");
+#endif
 
     size_t patlen = pattern.length();
     std::vector<std::string> dirs;
@@ -347,33 +377,47 @@ ImageOutput::create (const std::string &filename,
         format = filename;
     }
 
-    recursive_lock_guard lock (imageio_mutex);  // Ensure thread safety
+    ImageOutput::Creator create_function = NULL;
+    {  // scope the lock:
+        recursive_lock_guard lock (imageio_mutex);  // Ensure thread safety
 
-    // See if it's already in the table.  If not, scan all plugins we can
-    // find to populate the table.
-    Strutil::to_lower (format);
-    if (output_formats.find (format) == output_formats.end())
-        catalog_all_plugins (plugin_searchpath.size() ? plugin_searchpath
+        // See if it's already in the table.  If not, scan all plugins we can
+        // find to populate the table.
+        Strutil::to_lower (format);
+        OutputPluginMap::const_iterator found = output_formats.find (format);
+        if (found == output_formats.end()) {
+            catalog_all_plugins (plugin_searchpath.size() ? plugin_searchpath
                                  : pvt::plugin_searchpath.string());
-
-    if (output_formats.find (format) == output_formats.end()) {
-        if (input_formats.empty()) {
-            // This error is so fundamental, we echo it to stderr in
-            // case the app is too dumb to do so.
-            const char *msg = "ImageOutput::create() could not find any ImageOutput plugins!  Perhaps you need to set OIIO_LIBRARY_PATH.\n";
-            fprintf (stderr, "%s", msg);
-            pvt::error ("%s", msg);
+            found = output_formats.find (format);
         }
-        else
-            pvt::error ("OpenImageIO could not find a format writer for \"%s\". "
-                        "Is it a file format that OpenImageIO doesn't know about?\n",
-                         filename.c_str());
-        return NULL;
+        if (found != output_formats.end()) {
+            create_function = found->second;
+        } else {
+            if (output_formats.empty()) {
+                // This error is so fundamental, we echo it to stderr in
+                // case the app is too dumb to do so.
+                const char *msg = "ImageOutput::create() could not find any ImageOutput plugins!  Perhaps you need to set OIIO_LIBRARY_PATH.\n";
+                fprintf (stderr, "%s", msg);
+                pvt::error ("%s", msg);
+            }
+            else
+                pvt::error ("OpenImageIO could not find a format writer for \"%s\". "
+                            "Is it a file format that OpenImageIO doesn't know about?\n",
+                            filename.c_str());
+            return NULL;
+        }
     }
 
-    ImageOutput::Creator create_function = output_formats[format];
     ASSERT (create_function != NULL);
     return (ImageOutput *) create_function();
+}
+
+
+
+void
+ImageOutput::destroy (ImageOutput *x)
+{
+    delete x;
 }
 
 
@@ -404,23 +448,28 @@ ImageInput::create (const std::string &filename,
         format = filename;
     }
 
-    recursive_lock_guard lock (imageio_mutex);  // Ensure thread safety
+    ImageInput::Creator create_function = NULL;
+    { // scope the lock:
+        recursive_lock_guard lock (imageio_mutex);  // Ensure thread safety
 
-    // See if it's already in the table.  If not, scan all plugins we can
-    // find to populate the table.
-    Strutil::to_lower (format);
-    if (input_formats.find (format) == input_formats.end())
-        catalog_all_plugins (plugin_searchpath.size() ? plugin_searchpath
+        // See if it's already in the table.  If not, scan all plugins we can
+        // find to populate the table.
+        Strutil::to_lower (format);
+        InputPluginMap::const_iterator found = input_formats.find (format);
+        if (found == input_formats.end()) {
+            catalog_all_plugins (plugin_searchpath.size() ? plugin_searchpath
                                  : pvt::plugin_searchpath.string());
+            found = input_formats.find (format);
+        }
+        if (found != input_formats.end())
+            create_function = found->second;
+    }
 
     // Remember which prototypes we've already tried, so we don't double dip.
     std::vector<ImageInput::Creator> formats_tried;
 
-    ImageInput::Creator create_function = NULL;
     std::string specific_error;
-    if (input_formats.find (format) != input_formats.end()) {
-        create_function = input_formats[format];
-        ASSERT (create_function != NULL);
+    if (create_function) {
         if (filename != format) {
             // If given a full filename, double-check that our guess
             // based on the extension actually works.  You never know
@@ -462,6 +511,7 @@ ImageInput::create (const std::string &filename,
         // doesn't yet exist).
         ImageSpec config;
         config.attribute ("nowait", (int)1);
+        recursive_lock_guard lock (imageio_mutex);  // Ensure thread safety
         for (InputPluginMap::const_iterator plugin = input_formats.begin();
              plugin != input_formats.end(); ++plugin)
         {
@@ -494,6 +544,7 @@ ImageInput::create (const std::string &filename,
     }
 
     if (create_function == NULL) {
+        recursive_lock_guard lock (imageio_mutex);  // Ensure thread safety
         if (input_formats.empty()) {
             // This error is so fundamental, we echo it to stderr in
             // case the app is too dumb to do so.
@@ -520,6 +571,15 @@ ImageInput::create (const std::string &filename,
 
     return (ImageInput *) create_function();
 }
+
+
+
+void
+ImageInput::destroy (ImageInput *x)
+{
+    delete x;
+}
+
 
 }
 OIIO_NAMESPACE_EXIT

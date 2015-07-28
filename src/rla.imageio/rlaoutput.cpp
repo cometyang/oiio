@@ -33,13 +33,13 @@
 #include <cmath>
 #include <ctime>
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "filesystem.h"
-#include "fmath.h"
-#include "strutil.h"
-#include "sysutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/sysutil.h"
 
 #include "rla_pvt.h"
 
@@ -58,12 +58,15 @@ public:
     RLAOutput ();
     virtual ~RLAOutput ();
     virtual const char * format_name (void) const { return "rla"; }
-    virtual bool supports (const std::string &feature) const;
+    virtual int supports (string_view feature) const;
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        OpenMode mode=Create);
     virtual bool close ();
     virtual bool write_scanline (int y, int z, TypeDesc format,
                                  const void *data, stride_t xstride);
+    virtual bool write_tile (int x, int y, int z, TypeDesc format,
+                             const void *data, stride_t xstride,
+                             stride_t ystride, stride_t zstride);
 
 private:
     std::string m_filename;           ///< Stash the filename
@@ -72,6 +75,8 @@ private:
     RLAHeader m_rla;                  ///< Wavefront RLA header
     std::vector<uint32_t> m_sot;      ///< Scanline offset table
     std::vector<unsigned char> m_rle; ///< Run record buffer for RLE
+    std::vector<unsigned char> m_tilebuffer;
+    unsigned int m_dither;
 
     // Initialize private members to pre-opened state
     void init (void) {
@@ -83,8 +88,10 @@ private:
     inline void set_chromaticity (const ImageIOParameter *p, char *dst,
                                   size_t field_size, const char *default_val);
     
-    /// Helper - handles the repetitive work of encoding and writing a channel
-    bool encode_channel (const unsigned char *data, stride_t xstride,
+    // Helper - handles the repetitive work of encoding and writing a
+    // channel. The data is guaranteed to be in the scratch area and need
+    // not be preserved.
+    bool encode_channel (unsigned char *data, stride_t xstride,
                          TypeDesc chantype, int bits);
     
     /// Helper - write, with error detection
@@ -143,8 +150,8 @@ RLAOutput::~RLAOutput ()
 
 
 
-bool
-RLAOutput::supports (const std::string &feature) const
+int
+RLAOutput::supports (string_view feature) const
 {
     if (feature == "random_access")
         return true;
@@ -153,6 +160,10 @@ RLAOutput::supports (const std::string &feature) const
     if (feature == "origin")
         return true;
     if (feature == "negativeorigin")
+        return true;
+    if (feature == "alpha")
+        return true;
+    if (feature == "nchannels")
         return true;
     // Support nothing else nonstandard
     return false;
@@ -202,6 +213,9 @@ RLAOutput::open (const std::string &name, const ImageSpec &userspec,
         error ("%s does not support volume images (depth > 1)", format_name());
         return false;
     }
+
+    m_dither = (m_spec.format == TypeDesc::UINT8) ?
+                    m_spec.get_int_attribute ("oiio:dither", 0) : 0;
 
     // prepare and write the RLA header
     memset (&m_rla, 0, sizeof (m_rla));
@@ -261,8 +275,16 @@ RLAOutput::open (const std::string &name, const ImageSpec &userspec,
     } else {
         m_rla.ColorChannelType = m_rla.MatteChannelType = m_rla.AuxChannelType =
             m_spec.format == TypeDesc::FLOAT ? CT_FLOAT : CT_BYTE;
-        m_rla.NumOfChannelBits = m_rla.NumOfMatteBits = m_rla.NumOfAuxBits =
-            m_spec.format.size () * 8;
+        int bits = m_spec.get_int_attribute ("oiio:BitsPerSample", 0);
+        if (bits) {
+            m_rla.NumOfChannelBits = bits;
+        } else {
+            if (m_spec.channelformats.size())
+                m_rla.NumOfChannelBits = m_spec.channelformats[0].size() * 8;
+            else
+                m_rla.NumOfChannelBits = m_spec.format.size() * 8;
+        }
+        m_rla.NumOfMatteBits = m_rla.NumOfAuxBits = m_rla.NumOfChannelBits;
         if (remaining >= 3) {
             // if we have at least 3 channels, treat them as colour
             m_rla.NumOfColorChannels = 3;
@@ -284,7 +306,7 @@ RLAOutput::open (const std::string &name, const ImageSpec &userspec,
     
     std::string s = m_spec.get_string_attribute ("oiio:ColorSpace", "Unknown");
     if (Strutil::iequals(s, "Linear"))
-        strcpy (m_rla.Gamma, "1.0");
+        Strutil::safe_strcpy (m_rla.Gamma, "1.0", sizeof(m_rla.Gamma));
     else if (Strutil::iequals(s, "GammaCorrected"))
         snprintf (m_rla.Gamma, sizeof(m_rla.Gamma), "%.10f",
             m_spec.get_float_attribute ("oiio:Gamma", 1.f));
@@ -347,8 +369,8 @@ RLAOutput::open (const std::string &name, const ImageSpec &userspec,
 
     snprintf (m_rla.AspectRatio, sizeof(m_rla.AspectRatio), "%.10f",
         m_spec.get_float_attribute ("PixelAspectRatio", 1.f));
-    strcpy (m_rla.ColorChannel, m_spec.get_string_attribute ("rla:ColorChannel",
-        "rgb").c_str ());
+    Strutil::safe_strcpy (m_rla.ColorChannel, m_spec.get_string_attribute ("rla:ColorChannel",
+        "rgb"), sizeof(m_rla.ColorChannel));
     m_rla.FieldRendered = m_spec.get_int_attribute ("rla:FieldRendered", 0);
 
     STRING_FIELD (Time, "rla:Time");
@@ -363,7 +385,12 @@ RLAOutput::open (const std::string &name, const ImageSpec &userspec,
     // zeroes upon seek
     m_sot.resize (m_spec.height, (int32_t)0);
     write (&m_sot[0], m_sot.size());
-    
+
+    // If user asked for tiles -- which this format doesn't support, emulate
+    // it by buffering the whole image.
+    if (m_spec.tile_width && m_spec.tile_height)
+        m_tilebuffer.resize (m_spec.image_bytes());
+
     return true;
 }
 
@@ -386,7 +413,7 @@ RLAOutput::set_chromaticity (const ImageIOParameter *p, char *dst,
                 break;
         }
     } else
-        strcpy (dst, default_val);
+        Strutil::safe_strcpy (dst, default_val, field_size);
 }
 
 
@@ -394,26 +421,35 @@ RLAOutput::set_chromaticity (const ImageIOParameter *p, char *dst,
 bool
 RLAOutput::close ()
 {
-    if (m_file) {
-        // Now that all scanlines ahve been output, return to write the
-        // correct scanline offset table to file.
-        fseek (m_file, sizeof(RLAHeader), SEEK_SET);
-        write (&m_sot[0], m_sot.size());
-
-        // close the stream
-        fclose (m_file);
-        m_file = NULL;
+    if (! m_file) {   // already closed
+        init ();
+        return true;
     }
+
+    bool ok = true;
+    if (m_spec.tile_width) {
+        // Handle tile emulation -- output the buffered pixels
+        ASSERT (m_tilebuffer.size());
+        ok &= write_scanlines (m_spec.y, m_spec.y+m_spec.height, 0,
+                               m_spec.format, &m_tilebuffer[0]);
+        std::vector<unsigned char>().swap (m_tilebuffer);
+    }
+
+    // Now that all scanlines ahve been output, return to write the
+    // correct scanline offset table to file and close the stream.
+    fseek (m_file, sizeof(RLAHeader), SEEK_SET);
+    write (&m_sot[0], m_sot.size());
+    fclose (m_file);
+    m_file = NULL;
     
     init ();      // re-initialize
-    return true;  // How can we fail?
-                  // Epicly. -- IneQuation
+    return ok;
 }
 
 
 
 bool
-RLAOutput::encode_channel (const unsigned char *data, stride_t xstride,
+RLAOutput::encode_channel (unsigned char *data, stride_t xstride,
                            TypeDesc chantype, int bits)
 {
     if (chantype == TypeDesc::FLOAT) {
@@ -423,6 +459,14 @@ RLAOutput::encode_channel (const unsigned char *data, stride_t xstride,
         for (int x = 0;  x < m_spec.width;  ++x)
             write ((const float *)&data[x*xstride]);
         return true;
+    }
+
+    if (chantype == TypeDesc::UINT16 && bits != 16) {
+        // Need to do bit scaling. Safe to overwrite data in place.
+        for (int x = 0;  x < m_spec.width;  ++x) {
+            unsigned short *s = (unsigned short *)(data + x*xstride);
+            *s = bit_range_convert (*s, 16, bits);
+        }
     }
 
     m_rle.resize (2);   // reserve t bytes for the encoded size
@@ -512,7 +556,8 @@ RLAOutput::write_scanline (int y, int z, TypeDesc format,
 {
     m_spec.auto_stride (xstride, format, spec().nchannels);
     const void *origdata = data;
-    data = to_native_scanline (format, data, xstride, m_scratch);
+    data = to_native_scanline (format, data, xstride, m_scratch,
+                               m_dither, y, z);
     if (data == origdata) {
         m_scratch.assign ((unsigned char *)data,
                           (unsigned char *)data+m_spec.scanline_bytes());
@@ -539,6 +584,19 @@ RLAOutput::write_scanline (int y, int z, TypeDesc format,
 
     return true;
 }
+
+
+
+bool
+RLAOutput::write_tile (int x, int y, int z, TypeDesc format,
+                       const void *data, stride_t xstride,
+                       stride_t ystride, stride_t zstride)
+{
+    // Emulate tiles by buffering the whole image
+    return copy_tile_to_image_buffer (x, y, z, format, data, xstride,
+                                      ystride, zstride, &m_tilebuffer[0]);
+}
+
 
 OIIO_PLUGIN_NAMESPACE_END
 

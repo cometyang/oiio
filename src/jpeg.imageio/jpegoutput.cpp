@@ -29,18 +29,13 @@
   (This is the Modified BSD License)
 */
 
-
 #include <cassert>
 #include <cstdio>
 #include <vector>
 
-extern "C" {
-#include "jpeglib.h"
-}
-
-#include "imageio.h"
-#include "filesystem.h"
-#include "fmath.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
 #include "jpeg_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
@@ -57,28 +52,46 @@ class JpgOutput : public ImageOutput {
     JpgOutput () { init(); }
     virtual ~JpgOutput () { close(); }
     virtual const char * format_name (void) const { return "jpeg"; }
-    virtual bool supports (const std::string &property) const { return false; }
+    virtual int supports (string_view feature) {
+        return (feature == "exif"
+             || feature == "iptc");
+    }
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        OpenMode mode=Create);
     virtual bool write_scanline (int y, int z, TypeDesc format,
                                  const void *data, stride_t xstride);
+    virtual bool write_tile (int x, int y, int z, TypeDesc format,
+                             const void *data, stride_t xstride,
+                             stride_t ystride, stride_t zstride);
     virtual bool close ();
     virtual bool copy_image (ImageInput *in);
 
  private:
     FILE *m_fd;
     std::string m_filename;
+    unsigned int m_dither;
     int m_next_scanline;             // Which scanline is the next to write?
     std::vector<unsigned char> m_scratch;
     struct jpeg_compress_struct m_cinfo;
     struct jpeg_error_mgr c_jerr;
     jvirt_barray_ptr *m_copy_coeffs;
     struct jpeg_decompress_struct *m_copy_decompressor;
+    std::vector<unsigned char> m_tilebuffer;
 
     void init (void) {
         m_fd = NULL;
         m_copy_coeffs = NULL;
         m_copy_decompressor = NULL;
+    }
+    
+    void set_subsampling (const int components[]) {
+        jpeg_set_colorspace (&m_cinfo, JCS_YCbCr);
+        m_cinfo.comp_info[0].h_samp_factor = components[0];
+        m_cinfo.comp_info[0].v_samp_factor = components[1];
+        m_cinfo.comp_info[1].h_samp_factor = components[2];
+        m_cinfo.comp_info[1].v_samp_factor = components[3];
+        m_cinfo.comp_info[2].h_samp_factor = components[4];
+        m_cinfo.comp_info[2].v_samp_factor = components[5];
     }
 };
 
@@ -124,7 +137,7 @@ JpgOutput::open (const std::string &name, const ImageSpec &newspec,
 
     if (m_spec.nchannels != 1 && m_spec.nchannels != 3 &&
             m_spec.nchannels != 4) {
-        error ("%s does not support %d-channel images\n",
+        error ("%s does not support %d-channel images",
                format_name(), m_spec.nchannels);
         return false;
     }
@@ -134,12 +147,6 @@ JpgOutput::open (const std::string &name, const ImageSpec &newspec,
         error ("Unable to open file \"%s\"", name.c_str());
         return false;
     }
-
-    int quality = 98;
-    const ImageIOParameter *qual = newspec.find_attribute ("CompressionQuality",
-                                                           TypeDesc::INT);
-    if (qual)
-        quality = * (const int *)qual->data();
 
     m_cinfo.err = jpeg_std_error (&c_jerr);             // set error handler
     jpeg_create_compress (&m_cinfo);                    // create compressor
@@ -172,9 +179,29 @@ JpgOutput::open (const std::string &name, const ImageSpec &newspec,
         m_cinfo.input_components = 1;
         m_cinfo.in_color_space = JCS_GRAYSCALE;
     }
-    m_cinfo.density_unit = 2; // RESUNIT_INCH;
-    m_cinfo.X_density = 72;
-    m_cinfo.Y_density = 72;
+
+    string_view resunit = m_spec.get_string_attribute ("ResolutionUnit");
+    if (Strutil::iequals (resunit, "none"))
+        m_cinfo.density_unit = 0;
+    else if (Strutil::iequals (resunit, "in"))
+        m_cinfo.density_unit = 1;
+    else if (Strutil::iequals (resunit, "cm"))
+        m_cinfo.density_unit = 2;
+    else
+        m_cinfo.density_unit = 0;
+    m_cinfo.X_density = int (m_spec.get_float_attribute ("XResolution"));
+    m_cinfo.Y_density = int (m_spec.get_float_attribute ("YResolution"));
+    float aspect = m_spec.get_float_attribute ("PixelAspectRatio", 1.0f);
+    if (m_cinfo.X_density <= 1 && m_cinfo.Y_density <= 1 && aspect != 1.0f) {
+        // No useful [XY]Resolution, but there is an aspect ratio requested.
+        // Arbitrarily pick 72 dots per undefined unit, and jigger it to
+        // honor it as best as we can.
+        m_cinfo.X_density = 72;
+        m_cinfo.Y_density = int (m_cinfo.X_density * aspect);
+        m_spec.attribute ("XResolution", 72.0f);
+        m_spec.attribute ("YResolution", 72.0f*aspect);
+    }
+
     m_cinfo.write_JFIF_header = TRUE;
 
     if (m_copy_coeffs) {
@@ -186,9 +213,27 @@ JpgOutput::open (const std::string &name, const ImageSpec &newspec,
     } else {
         // normal write of scanlines
         jpeg_set_defaults (&m_cinfo);                 // default compression
+        // Careful -- jpeg_set_defaults overwrites density
+        m_cinfo.X_density = int (m_spec.get_float_attribute ("XResolution"));
+        m_cinfo.Y_density = int (m_spec.get_float_attribute ("YResolution", m_cinfo.X_density));
         DBG std::cout << "out open: set_defaults\n";
+        int quality = newspec.get_int_attribute ("CompressionQuality", 98);
         jpeg_set_quality (&m_cinfo, quality, TRUE);   // baseline values
         DBG std::cout << "out open: set_quality\n";
+        
+        if (m_cinfo.input_components == 3) {
+            std::string subsampling = m_spec.get_string_attribute (JPEG_SUBSAMPLING_ATTR);
+            if (subsampling == JPEG_444_STR)
+                set_subsampling(JPEG_444_COMP);
+            else if (subsampling == JPEG_422_STR)
+                set_subsampling(JPEG_422_COMP);
+            else if (subsampling == JPEG_420_STR)
+                set_subsampling(JPEG_420_COMP);
+            else if (subsampling == JPEG_411_STR)
+                set_subsampling(JPEG_411_COMP);
+        }
+        DBG std::cout << "out open: set_colorspace\n";
+                
         jpeg_start_compress (&m_cinfo, TRUE);         // start working
         DBG std::cout << "out open: start_compress\n";
     }
@@ -247,25 +292,44 @@ JpgOutput::open (const std::string &name, const ImageSpec &newspec,
         jpeg_write_marker (&m_cinfo, JPEG_APP0+1, (JOCTET*)&block[0], block.size());
     }
 
-	m_spec.set_format (TypeDesc::UINT8);  // JPG is only 8 bit
-	// Write ICC profile, if we have anything
-	unsigned char* icc_profile=NULL;
-	unsigned int length=0;
-	if(m_spec.get_icc_profile(icc_profile,length)){
-		unsigned char icc_signature[12] = { 0x49, 0x43, 0x43, 0x5F, 0x50, 0x52, 0x4F, 0x46, 0x49, 0x4C, 0x45, 0x00 }; //"ICC_PROFILE"
-		unsigned char* profile=(unsigned char*)malloc((length+ICC_HEADER_SIZE)*sizeof(unsigned char));
-		if(profile == NULL) return false;
-		memcpy(profile,icc_signature,12);
-		for(long i=0;i<(int)length;i+=MAX_DATA_BYTES_IN_MARKER){
-			long total_length=length+ICC_HEADER_SIZE;
-			unsigned marker_size=std::min(total_length,MAX_DATA_BYTES_IN_MARKER);
-			profile[12]=(unsigned char) ((i / MAX_DATA_BYTES_IN_MARKER) + 1);
-			profile[13]=(unsigned char) (length/MAX_DATA_BYTES_IN_MARKER + 1);
-			memcpy(profile+ICC_HEADER_SIZE, icc_profile,length); 
-			jpeg_write_marker(&m_cinfo, JPEG_APP0+2, profile,total_length);
-		}
-		free(profile);
-	}
+
+    m_spec.set_format (TypeDesc::UINT8);  // JPG is only 8 bit
+
+    // Write ICC profile, if we have anything
+    const ImageIOParameter* icc_profile_parameter = m_spec.find_attribute(ICC_PROFILE_ATTR);
+    if (icc_profile_parameter != NULL) {
+        unsigned char *icc_profile = (unsigned char*)icc_profile_parameter->data();
+        unsigned int icc_profile_length = icc_profile_parameter->type().size();
+        if (icc_profile && icc_profile_length){
+            /* Calculate the number of markers we'll need, rounding up of course */
+            int num_markers = icc_profile_length / MAX_DATA_BYTES_IN_MARKER;
+            if ((unsigned int)(num_markers * MAX_DATA_BYTES_IN_MARKER) != icc_profile_length)
+                num_markers++;
+            int curr_marker = 1;  /* per spec, count strarts at 1*/
+            std::vector<unsigned char> profile (MAX_DATA_BYTES_IN_MARKER + ICC_HEADER_SIZE);
+            while (icc_profile_length > 0) {
+                // length of profile to put in this marker
+                unsigned int length = std::min (icc_profile_length, (unsigned int)MAX_DATA_BYTES_IN_MARKER);
+                icc_profile_length -= length;
+                // Write the JPEG marker header (APP2 code and marker length)
+                strcpy ((char *)&profile[0], "ICC_PROFILE");
+                profile[11] = 0;
+                profile[12] = curr_marker;
+                profile[13] = (unsigned char) num_markers;
+                memcpy(&profile[0] + ICC_HEADER_SIZE, icc_profile+length*(curr_marker-1), length);
+                jpeg_write_marker(&m_cinfo, JPEG_APP0 + 2, &profile[0], ICC_HEADER_SIZE+length);
+                curr_marker++;
+            }
+        }
+    }
+
+    m_dither = m_spec.get_int_attribute ("oiio:dither", 0);
+
+    // If user asked for tiles -- which JPEG doesn't support, emulate it by
+    // buffering the whole image.
+    if (m_spec.tile_width && m_spec.tile_height)
+        m_tilebuffer.resize (m_spec.image_bytes());
+
     return true;
 }
 
@@ -302,7 +366,8 @@ JpgOutput::write_scanline (int y, int z, TypeDesc format,
     int save_nchannels = m_spec.nchannels;
     m_spec.nchannels = m_cinfo.input_components;
 
-    data = to_native_scanline (format, data, xstride, m_scratch);
+    data = to_native_scanline (format, data, xstride, m_scratch,
+                               m_dither, y, z);
     m_spec.nchannels = save_nchannels;
 
     jpeg_write_scanlines (&m_cinfo, (JSAMPLE**)&data, 1);
@@ -314,10 +379,34 @@ JpgOutput::write_scanline (int y, int z, TypeDesc format,
 
 
 bool
+JpgOutput::write_tile (int x, int y, int z, TypeDesc format,
+                       const void *data, stride_t xstride,
+                       stride_t ystride, stride_t zstride)
+{
+    // Emulate tiles by buffering the whole image
+    return copy_tile_to_image_buffer (x, y, z, format, data, xstride,
+                                      ystride, zstride, &m_tilebuffer[0]);
+}
+
+
+
+bool
 JpgOutput::close ()
 {
-    if (! m_fd)          // Already closed
+    if (! m_fd) {         // Already closed
         return true;
+        init();
+    }
+
+    bool ok = true;
+
+    if (m_spec.tile_width) {
+        // We've been emulating tiles; now dump as scanlines.
+        ASSERT (m_tilebuffer.size());
+        ok &= write_scanlines (m_spec.y, m_spec.y+m_spec.height, 0,
+                               m_spec.format, &m_tilebuffer[0]);
+        std::vector<unsigned char>().swap (m_tilebuffer);  // free it
+    }
 
     if (m_next_scanline < spec().height && m_copy_coeffs == NULL) {
         // But if we've only written some scanlines, write the rest to avoid
@@ -346,7 +435,7 @@ JpgOutput::close ()
     m_fd = NULL;
     init();
     
-    return true;
+    return ok;
 }
 
 

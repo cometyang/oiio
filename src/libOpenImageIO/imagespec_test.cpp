@@ -29,15 +29,16 @@
 */
 
 
-#include "imageio.h"
-#include "fmath.h"
-#include "unittest.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/unittest.h"
 
 OIIO_NAMESPACE_USING;
 
 
 void test_imagespec_pixels ()
 {
+    std::cout << "test_imagespec_pixels\n";
     // images with dimensions > 2^16 (65536) on a side have > 2^32 pixels
     const long long WIDTH = 456789;
     const long long HEIGHT = 345678;
@@ -97,6 +98,7 @@ metadata_val_test (void *data, int num_elements, TypeDesc type, std::string& val
 
 void test_imagespec_metadata_val ()
 {
+    std::cout << "test_imagespec_metadata_val\n";
     std::string ret;
 
     int imatrix[] = {100, 200, 300, 400};
@@ -153,47 +155,81 @@ attribute_test (const std::string &data, TypeDesc type, std::string &ret)
 
 void test_imagespec_attribute_from_string ()
 {
+    std::cout << "test_imagespec_attribute_from_string\n";
     TypeDesc type = TypeDesc::TypeInt;
     std::string ret, data, invalid_data;
 
-    data = "1, 2, 3, 4, 5, 6";
+    data = "142";
     attribute_test (data, type, ret);
     OIIO_CHECK_EQUAL (ret, data);
 
     type = TypeDesc::TypeFloat;
+    data = "1.23";
+    attribute_test (data, type, ret);
+    OIIO_CHECK_EQUAL (ret, data);
+
+    type = TypeDesc(TypeDesc::FLOAT, 5);
     data = "1.23, 34.23, 35.11, 99.99, 1999.99";
     attribute_test (data, type, ret);
     OIIO_CHECK_EQUAL (ret, data);
 
     type = TypeDesc::UINT64;
-    data = "18446744073709551615, 18446744073709551615";
+    data = "18446744073709551615";
     attribute_test (data, type, ret);
     OIIO_CHECK_EQUAL (ret, data);
-    invalid_data = "18446744073709551615";
-    OIIO_CHECK_NE (ret, invalid_data);
-    invalid_data = "18446744073709551614, 18446744073709551615";
-    OIIO_CHECK_NE (ret, invalid_data);
-
-    type = TypeDesc::INT64;
-    data = "-1, 9223372036854775807";
-    attribute_test (data, type, ret);
-    OIIO_CHECK_EQUAL (ret, data);
-    invalid_data = "-1";
-    OIIO_CHECK_NE (ret, invalid_data);
 
     type = TypeDesc::TypeMatrix;
-    data = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36";
+    data = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16";
     attribute_test (data, type, ret);
     OIIO_CHECK_EQUAL (ret, data);
-    invalid_data = data = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36";
-    OIIO_CHECK_NE (ret, invalid_data);
 
     type = TypeDesc::TypeString;
-    data = "\"imageParameter:param\"";
+    data = "foo";
     attribute_test (data, type, ret);
-    OIIO_CHECK_EQUAL (ret, data);
+    OIIO_CHECK_EQUAL (ret, "\"foo\"");
 }
 
+
+
+static void
+test_get_attribute ()
+{
+    std::cout << "test_get_attribute\n";
+    ImageSpec spec (640, 480, 4, TypeDesc::FLOAT);
+    spec.x = 10; spec.y = 12;
+    spec.full_x = -5; spec.full_y = -8;
+    spec.full_width = 1024; spec.full_height = 800;
+    spec.tile_width = 64; spec.tile_height = 32;
+    spec.attribute ("foo", int(42));
+    spec.attribute ("pi", float(M_PI));
+    spec.attribute ("bar", "barbarbar?");
+
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("width"), 640);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("height"), 480);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("nchannels"), 4);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("x"), 10);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("y"), 12);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("full_x"), -5);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("full_y"), -8);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("full_width"), 1024);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("full_height"), 800);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("tile_width"), 64);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("tile_height"), 32);
+    OIIO_CHECK_EQUAL (spec.get_string_attribute("geom"), "640x480+10+12");
+    OIIO_CHECK_EQUAL (spec.get_string_attribute("full_geom"), "1024x800-5-8");
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("foo"), 42);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("pi",4), 4);  // should fail int
+    OIIO_CHECK_EQUAL (spec.get_float_attribute("pi"), float(M_PI));
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("bar"), 0);
+    OIIO_CHECK_EQUAL (spec.get_int_attribute("bar"), 0);
+    OIIO_CHECK_EQUAL (spec.get_string_attribute("bar"), "barbarbar?");
+    OIIO_CHECK_ASSERT(spec.find_attribute("foo") != NULL);
+    OIIO_CHECK_ASSERT(spec.find_attribute("Foo") != NULL);
+    OIIO_CHECK_ASSERT(spec.find_attribute("Foo", TypeDesc::UNKNOWN, false) != NULL);
+    OIIO_CHECK_ASSERT(spec.find_attribute("Foo", TypeDesc::UNKNOWN, true) == NULL);
+    OIIO_CHECK_ASSERT(spec.find_attribute("foo", TypeDesc::INT) != NULL);
+    OIIO_CHECK_ASSERT(spec.find_attribute("foo", TypeDesc::FLOAT) == NULL);
+}
 
 
 
@@ -202,6 +238,7 @@ int main (int argc, char *argv[])
     test_imagespec_pixels ();
     test_imagespec_metadata_val ();
     test_imagespec_attribute_from_string ();
+    test_get_attribute ();
 
     return unit_test_failures;
 }

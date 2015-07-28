@@ -34,11 +34,11 @@
 #include <boost/regex.hpp>
 #include <boost/tokenizer.hpp>
 
-#include "thread.h"
-#include "strutil.h"
-#include "fmath.h"
-#include "imageio.h"
-#include <pugixml.hpp>
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/pugixml.hpp"
 
 #define DEBUG_XMP_READ  0
 #define DEBUG_XMP_WRITE 0
@@ -122,6 +122,7 @@ static XMPtag xmptag [] = {
     { "dc:Rights", "Copyright", TypeDesc::STRING, TiffRedundant },
     { "dc:title", "IPTC:ObjectName", TypeDesc::STRING, 0 },
     { "dc:subject", "Keywords", TypeDesc::STRING, IsList },
+    { "dc:keywords", "Keywords", TypeDesc::STRING, IsList },
 
     { "Iptc4xmpCore:IntellectualGenre", "IPTC:IntellectualGenre", TypeDesc::STRING, 0 },
     { "Iptc4xmpCore:CountryCode", "IPTC:CountryCode", TypeDesc::STRING, 0 },
@@ -169,8 +170,10 @@ add_attrib (ImageSpec &spec, const char *xmlname, const char *xmlvalue)
                     bool dup = false;
                     if (p) {
                         Strutil::split (*(const char **)p->data(), items, ";");
-                        for (size_t i = 0;  i < items.size();  ++i)
-                            dup |= (items[i] == xmlvalue);
+                        for (size_t item = 0;  item < items.size();  ++item) {
+                            items[item] = Strutil::strip (items[item]);
+                            dup |= (items[item] == xmlvalue);
+                        }
                         dup |= (xmlvalue == std::string(*(const char **)p->data()));
                     }
                     if (! dup)

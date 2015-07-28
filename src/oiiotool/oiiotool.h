@@ -31,9 +31,9 @@
 
 #ifndef OIIOTOOL_H
 
-#include "imagebuf.h"
-#include "refcnt.h"
-#include "timer.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/refcnt.h"
+#include "OpenImageIO/timer.h"
 
 
 OIIO_NAMESPACE_ENTER {
@@ -50,14 +50,20 @@ class Oiiotool {
 public:
     // General options
     bool verbose;
+    bool debug;
+    bool dryrun;
     bool runstats;
     bool noclobber;
     bool allsubimages;
     bool printinfo;
     bool printstats;
+    bool dumpdata;
+    bool dumpdata_showempty;
     bool hash;
     bool updatemode;
-    int threads;
+    bool autoorient;
+    bool autocc;                      // automatically color correct
+    bool nativeread;                  // force native data type reads
     std::string full_command_line;
     std::string printinfo_metamatch;
     std::string printinfo_nometamatch;
@@ -74,6 +80,9 @@ public:
     bool output_adjust_time;
     bool output_autocrop;
     bool output_autotrim;
+    bool output_dither;
+    bool output_force_tiles; // for debugging
+    bool metadata_nosoftwareattrib;
 
     // Options for --diff
     float diff_warnthresh;
@@ -86,6 +95,7 @@ public:
     // Internal state
     ImageRecRef curimg;                      // current image
     std::vector<ImageRecRef> image_stack;    // stack of previous images
+    std::map<std::string, ImageRecRef> image_labels; // labeled images
     ImageCache *imagecache;                  // back ptr to ImageCache
     int return_value;                        // oiiotool command return code
     ColorConfig colorconfig;                 // OCIO color config
@@ -100,10 +110,16 @@ public:
 
     void clear_options ();
 
-    // Force img to be read at this point.
-    void read (ImageRecRef img);
+    /// Force img to be read at this point.  Use this wrapper, don't directly
+    /// call img->read(), because there's extra work done here specific to
+    /// oiiotool.
+    bool read (ImageRecRef img);
     // Read the current image
-    void read () { if (curimg) read (curimg); }
+    bool read () {
+        if (curimg)
+            return read (curimg);
+        return true;
+    }
 
     // If required_images are not yet on the stack, then postpone this
     // call by putting it on the 'pending' list and return true.
@@ -142,12 +158,46 @@ public:
 
     ImageRecRef top () { return curimg; }
 
-    void error (const std::string &command, const std::string &explanation="");
+    // Modify the resolution and/or offset according to what's in geom.
+    // Valid geometries are WxH (resolution), +X+Y (offsets), WxH+X+Y
+    // (resolution and offset).  If 'allow_scaling' is true, geometries of
+    // S% (e.g. "50%") or just S (e.g., "1.2") will be accepted to scale the
+    // existing width and height (rounding to the nearest whole number of
+    // pixels.
+    bool adjust_geometry (string_view command,
+                          int &w, int &h, int &x, int &y, const char *geom,
+                          bool allow_scaling=false);
+
+    // Expand substitution expressions in string str. Expressions are
+    // enclosed in braces: {...}. An expression consists of:
+    //   * a numeric constant ("42" or "3.14")
+    //   * arbitrary math using operators +, -, *, / and parentheses
+    //     (order of operations is respected).
+    //   * IMG[n].metadata for the metadata of an image. The 'n' may be an
+    //     image name, or an integer giving stack position (for example,
+    //     "IMG[0]" is the top of the stack; also "TOP" is a synonym). The
+    //     metadata can be any of the usual named metadata from the image's
+    //     spec, such as "width", "ImageDescription", etc.
+    string_view express (string_view str);
+
+    int extract_options (std::map<std::string,std::string> &options,
+                         std::string command);
+
+    void error (string_view command, string_view explanation="");
+    void warning (string_view command, string_view explanation="");
 
 private:
     CallbackFunction m_pending_callback;
     int m_pending_argc;
     const char *m_pending_argv[4];
+
+    void express_error (const string_view expr, const string_view s, string_view explanation);
+
+    bool express_parse_atom (const string_view expr, string_view& s, std::string& result);
+    bool express_parse_factors (const string_view expr, string_view& s, std::string& result);
+    bool express_parse_summands (const string_view expr, string_view& s, std::string& result);
+
+    std::string express_impl (string_view s);
 };
 
 
@@ -262,7 +312,7 @@ public:
     // it's lazily kept as name only, without reading the file.)
     bool elaborated () const { return m_elaborated; }
 
-    bool read ();
+    bool read (bool force_native_read=false);
 
     // ir(subimg,mip) references a specific MIP level of a subimage
     // ir(subimg) references the first MIP level of a subimage
@@ -296,6 +346,21 @@ public:
         metadata_modified();
     }
 
+    /// Error reporting for ImageRec: call this with printf-like arguments.
+    /// Note however that this is fully typesafe!
+    /// void error (const char *format, ...)
+    TINYFORMAT_WRAP_FORMAT (void, error, const,
+        std::ostringstream msg;, msg, append_error(msg.str());)
+
+    /// Return true if the IR has had an error and has an error message
+    /// to retrieve via geterror().
+    bool has_error (void) const;
+
+    /// Return the text of all error messages issued since geterror() was
+    /// called (or an empty string if no errors are pending).  This also
+    /// clears the error message for next time if clear_error is true.
+    std::string geterror (bool clear_error = true) const;
+
 private:
     std::string m_name;
     bool m_elaborated;
@@ -304,6 +369,11 @@ private:
     std::vector<SubimageRec> m_subimages;
     std::time_t m_time;  //< Modification time of the input file
     ImageCache *m_imagecache;
+    mutable std::string m_err;
+
+    // Add to the error message
+    void append_error (string_view message) const;
+
 };
 
 
@@ -316,13 +386,16 @@ struct print_info_options {
     bool subimages;
     bool compute_sha1;
     bool compute_stats;
+    bool dumpdata;
+    bool dumpdata_showempty;
     std::string metamatch;
     std::string nometamatch;
     size_t namefieldlength;
 
     print_info_options ()
         : verbose(false), filenameprefix(false), sum(false), subimages(false),
-          compute_sha1(false), compute_stats(false), namefieldlength(20)
+          compute_sha1(false), compute_stats(false), dumpdata(false),
+          dumpdata_showempty(true), namefieldlength(20)
     {}
 };
 
@@ -332,27 +405,18 @@ struct print_info_options {
 // of the uncompressed pixels in the file is returned in totalsize.  The
 // return value will be true if everything is ok, or false if there is
 // an error (in which case the error message will be stored in 'error').
-bool print_info (const std::string &filename, 
+bool print_info (Oiiotool &ot, const std::string &filename, 
                  const print_info_options &opt,
                  long long &totalsize, std::string &error);
 
-
-// Modify the resolution and/or offset according to what's in geom.
-// Valid geometries are WxH (resolution), +X+Y (offsets), WxH+X+Y
-// (resolution and offset).  If 'allow_scaling' is true, geometries of
-// S% (e.g. "50%") or just S (e.g., "1.2") will be accepted to scale the
-// existing width and height (rounding to the nearest whole number of
-// pixels.
-bool adjust_geometry (int &w, int &h, int &x, int &y, const char *geom,
-                      bool allow_scaling=false);
 
 // Set an attribute of the given image.  The type should be one of
 // TypeDesc::INT (decode the value as an int), FLOAT, STRING, or UNKNOWN
 // (look at the string and try to discern whether it's an int, float, or
 // string).  If the 'value' string is empty, it will delete the
 // attribute.
-bool set_attribute (ImageRecRef img, const std::string &attribname,
-                    TypeDesc type, const std::string &value);
+bool set_attribute (ImageRecRef img, string_view attribname,
+                    TypeDesc type, string_view value);
 
 inline bool same_size (const ImageBuf &A, const ImageBuf &B)
 {
@@ -371,7 +435,8 @@ enum DiffErrors {
     DiffErrLast
 };
 
-int do_action_diff (ImageRec &ir0, ImageRec &ir1, Oiiotool &options);
+int do_action_diff (ImageRec &ir0, ImageRec &ir1, Oiiotool &options,
+                    int perceptual = 0);
 
 
 
@@ -387,7 +452,9 @@ bool apply_spec_mod (ImageRec &img, Action act, const Type &t,
     img.metadata_modified (true);
     for (int s = 0, send = img.subimages();  s < send;  ++s) {
         for (int m = 0, mend = img.miplevels(s);  m < mend;  ++m) {
-            ok &= act (*img.spec(s,m), t);
+            ok &= act (img(s,m).specmod(), t);
+            if (ok)
+                img.update_spec_from_imagebuf (s, m);
             if (! allsubimages)
                 break;
         }
@@ -396,6 +463,185 @@ bool apply_spec_mod (ImageRec &img, Action act, const Type &t,
     }
     return ok;
 }
+
+
+
+/// Base class for an Oiiotool operation/command. Rather than repeating
+/// code, this provides the boilerplate that nearly every op must do,
+/// with just a couple tiny places that need to be overridden for each op,
+/// generally only the impl() method.
+///
+class OiiotoolOp {
+public:
+    // The constructor records the arguments (including running them
+    // through expression substitution) and pops the input images off the
+    // stack.
+    OiiotoolOp (Oiiotool &ot, string_view opname,
+                int argc, const char *argv[], int ninputs)
+        : ot(ot), m_opname(opname), m_nargs(argc), m_nimages(ninputs+1)
+    {
+        args.reserve (argc);
+        for (int i = 0; i < argc; ++i)
+            args.push_back (ot.express (argv[i]));
+        ir.resize (ninputs+1);  // including reserving a spot for result
+        for (int i = 0; i < ninputs; ++i)
+            ir[ninputs-i] = ot.pop();
+    }
+    virtual ~OiiotoolOp () {}
+
+    // The operator(), function-call mode, does most of the work. Although
+    // it's virtual, in general you shouldn't need to override it. Instead,
+    // just override impl(), and maybe option_defaults.
+    virtual int operator() () {
+        // Set up a timer to automatically record how much time is spent in
+        // every class of operation.
+        Timer timer (ot.enable_function_timing);
+        if (ot.debug) {
+            std::cout << "Performing '" << opname() << "'";
+            if (nargs() > 1)
+                std::cout << " with args: ";
+            for (int i = 0; i < nargs(); ++i)
+                std::cout << (i > 0 ? ", \"" : " \"") << args[i] << "\"";
+            std::cout << "\n";
+        }
+
+        // Read all input images, and reserve (and push) the output image.
+        int subimages = compute_subimages();
+        if (nimages()) {
+            // Read the inputs
+            for (int i = 1; i < nimages(); ++i)
+                ot.read (ir[i]);
+            // Initialize the output image
+            ir[0].reset (new ImageRec (opname(), subimages));
+            ot.push (ir[0]);
+        }
+
+        // Parse the options.
+        options.clear ();
+        option_defaults ();  // this can be customized to set up defaults
+        ot.extract_options (options, args[0]);
+
+        // Give a chance for customization before we walk the subimages.
+        // If the setup method returns false, we're done.
+        if (! setup ())
+            return 0;
+
+        // For each subimage, find the ImageBuf's for input and output
+        // images, and call impl().
+        for (int s = 0;  s < subimages;  ++s) {
+            // Get pointers for the ImageBufs for this subimage
+            img.resize (nimages());
+            for (int i = 0; i < nimages(); ++i)
+                img[i] = &((*ir[i])(std::min (s, ir[i]->subimages())));
+
+            // Call the impl kernel for this subimage
+            bool ok = impl (nimages() ? &img[0] : NULL);
+            if (! ok)
+                ot.error (opname(), img[0]->geterror());
+            ir[0]->update_spec_from_imagebuf (s);
+        }
+
+        // Optional cleanup after processing all the subimages
+        cleanup ();
+
+        // Add the time we spent to the stats total for this op type.
+        ot.function_times[opname()] += timer();
+        return 0;
+    }
+
+    // THIS is the method that needs to be separately overloaded for each
+    // different op. This is called once for each subimage, generally with
+    // img[0] the destination ImageBuf, and img[1..] as the inputs.
+    virtual int impl (ImageBuf **img) = 0;
+
+    // Extra place to inject customization before the subimages are
+    // traversed.
+    virtual bool setup () { return true; }
+
+    // Extra place to inject customization after the subimges are traversed.
+    virtual bool cleanup () { return true; }
+
+    // Override this if the impl uses options and needs any of them set
+    // to defaults. This will be called separate
+    virtual void option_defaults () { }
+
+    // By default, we make the results have the same number of subimages as
+    // the first input image. Override this is you want another behavior.
+    virtual int compute_subimages () {
+        return ot.allsubimages ? (nimages() > 1 ? ir[1]->subimages() : 1) : 1;
+    }
+
+    int nargs () const { return m_nargs; }
+    int nimages () const { return m_nimages; }
+    string_view opname () const { return m_opname; }
+
+protected:
+    Oiiotool &ot;
+    std::string m_opname;
+    int m_nargs;
+    int m_nimages;
+    std::vector<ImageRecRef> ir;
+    std::vector<ImageBuf *> img;
+    std::vector<string_view> args;
+    std::map<std::string,std::string> options;
+};
+
+
+typedef bool (*IBAunary) (ImageBuf &dst, const ImageBuf &A, ROI roi, int nthreads);
+typedef bool (*IBAbinary) (ImageBuf &dst, const ImageBuf &A,
+                           const ImageBuf &B, ROI roi, int nthreads);
+typedef bool (*IBAbinary_img_col) (ImageBuf &dst, const ImageBuf &A,
+                                   const float *B, ROI roi, int nthreads);
+
+template<typename IBLIMPL=IBAunary>
+class OiiotoolSimpleUnaryOp : public OiiotoolOp {
+public:
+    OiiotoolSimpleUnaryOp (IBLIMPL opimpl, Oiiotool &ot, string_view opname,
+                           int argc, const char *argv[], int ninputs)
+        : OiiotoolOp (ot, opname, argc, argv, 1), opimpl(opimpl)
+    {}
+    virtual int impl (ImageBuf **img) {
+        return opimpl (*img[0], *img[1], ROI(), 0);
+    }
+protected:
+    IBLIMPL opimpl;
+};
+
+template<typename IBLIMPL=IBAbinary>
+class OiiotoolSimpleBinaryOp : public OiiotoolOp {
+public:
+    OiiotoolSimpleBinaryOp (IBLIMPL opimpl, Oiiotool &ot, string_view opname,
+                            int argc, const char *argv[], int ninputs)
+        : OiiotoolOp (ot, opname, argc, argv, 2), opimpl(opimpl)
+    {}
+    virtual int impl (ImageBuf **img) {
+        return opimpl (*img[0], *img[1], *img[2], ROI(), 0);
+    }
+protected:
+    IBLIMPL opimpl;
+};
+
+template<typename IBLIMPL=IBAbinary_img_col>
+class OiiotoolImageColorOp : public OiiotoolOp {
+public:
+    OiiotoolImageColorOp (IBLIMPL opimpl, Oiiotool &ot, string_view opname,
+                          int argc, const char *argv[], int ninputs,
+                          float defaultval=0.0f)
+        : OiiotoolOp (ot, opname, argc, argv, 1), opimpl(opimpl),
+          defaultval(defaultval)
+    {}
+    virtual int impl (ImageBuf **img) {
+        int nchans = img[1]->spec().nchannels;
+        std::vector<float> val (nchans, defaultval);
+        int nvals = Strutil::extract_from_list_string (val, args[1]);
+        val.resize (nvals);
+        val.resize (nchans, val.size() == 1 ? val.back() : defaultval);
+        return opimpl (*img[0], *img[1], &val[0], ROI(), 0);
+    }
+protected:
+    IBLIMPL opimpl;
+    float defaultval;
+};
 
 
 } // OiioTool namespace

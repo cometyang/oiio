@@ -28,7 +28,7 @@
   (This is the Modified BSD License)
 */
 
-#include "strutil.h"
+#include "OpenImageIO/strutil.h"
 #include "bmp_pvt.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
@@ -50,6 +50,14 @@ OIIO_PLUGIN_EXPORTS_END
 
 
 
+int
+BmpOutput::supports (string_view feature) const
+{
+    return (feature == "alpha");
+}
+
+
+
 bool
 BmpOutput::open (const std::string &name, const ImageSpec &spec,
                  OpenMode mode)
@@ -63,7 +71,11 @@ BmpOutput::open (const std::string &name, const ImageSpec &spec,
     m_filename = name;
     m_spec = spec;
 
-    // TODO: Figure out what to do with nchannels.
+    if (m_spec.nchannels != 3 && m_spec.nchannels != 4) {
+        error ("%s does not support %d-channel images\n",
+               format_name(), m_spec.nchannels);
+        return false;
+    }
 
     m_fd = Filesystem::fopen (m_filename, "wb");
     if (! m_fd) {
@@ -80,6 +92,12 @@ BmpOutput::open (const std::string &name, const ImageSpec &spec,
 
     // Only support 8 bit channels for now.
     m_spec.set_format (TypeDesc::UINT8);
+    m_dither = m_spec.get_int_attribute ("oiio:dither", 0);
+
+    // If user asked for tiles -- which this format doesn't support, emulate
+    // it by buffering the whole image.
+    if (m_spec.tile_width && m_spec.tile_height)
+        m_tilebuffer.resize (m_spec.image_bytes());
 
     return true;
 }
@@ -103,7 +121,8 @@ BmpOutput::write_scanline (int y, int z, TypeDesc format, const void *data,
     fseek (m_fd, scanline_off, SEEK_CUR);
 
     std::vector<unsigned char> scratch;
-    data = to_native_scanline (format, data, xstride, scratch);
+    data = to_native_scanline (format, data, xstride, scratch,
+                               m_dither, y, z);
     std::vector<unsigned char> buf (m_scanline_size);
     memcpy (&buf[0], data, m_scanline_size);
 
@@ -118,13 +137,37 @@ BmpOutput::write_scanline (int y, int z, TypeDesc format, const void *data,
 
 
 bool
+BmpOutput::write_tile (int x, int y, int z, TypeDesc format,
+                       const void *data, stride_t xstride,
+                       stride_t ystride, stride_t zstride)
+{
+    // Emulate tiles by buffering the whole image
+    return copy_tile_to_image_buffer (x, y, z, format, data, xstride,
+                                      ystride, zstride, &m_tilebuffer[0]);
+}
+
+
+
+bool
 BmpOutput::close (void)
 {
-    if (m_fd) {
-        fclose (m_fd);
-        m_fd = NULL;
+    if (! m_fd) {   // already closed
+        init ();
+        return true;
     }
-    return true;
+
+    bool ok = true;
+    if (m_spec.tile_width) {
+        // Handle tile emulation -- output the buffered pixels
+        ASSERT (m_tilebuffer.size());
+        ok &= write_scanlines (m_spec.y, m_spec.y+m_spec.height, 0,
+                               m_spec.format, &m_tilebuffer[0]);
+        std::vector<unsigned char>().swap (m_tilebuffer);
+    }
+
+    fclose (m_fd);
+    m_fd = NULL;
+    return ok;
 }
 
 

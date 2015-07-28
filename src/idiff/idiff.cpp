@@ -37,17 +37,14 @@
 #include <iomanip>
 #include <iterator>
 
-#include "dassert.h"
-#include "argparse.h"
-#include "imageio.h"
-#include "imagecache.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-
-#ifdef __APPLE__
- using std::isinf;
- using std::isnan;
-#endif
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/argparse.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/imagecache.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
 
 
 OIIO_NAMESPACE_USING
@@ -163,9 +160,9 @@ read_input (const std::string &filename, ImageBuf &img,
 inline void
 safe_double_print (double val)
 {
-    if (isnan (val))
+    if (OIIO::isnan (val))
         std::cout << "nan";
-    else if (isinf (val))
+    else if (OIIO::isinf (val))
         std::cout << "inf";
     else
         std::cout << val;
@@ -194,6 +191,7 @@ print_subimage (ImageBuf &img0, int subimage, int miplevel)
 int
 main (int argc, char *argv[])
 {
+    Filesystem::convert_native_arguments (argc, (const char **)argv);
     getargs (argc, argv);
 
     std::cout << "Comparing \"" << filenames[0] 
@@ -265,8 +263,10 @@ main (int argc, char *argv[])
             ImageBufAlgo::compare (img0, img1, failthresh, warnthresh, cr);
 
             int yee_failures = 0;
-            if (perceptual && ! img0.deep())
-                yee_failures = ImageBufAlgo::compare_Yee (img0, img1);
+            if (perceptual && ! img0.deep()) {
+                ImageBufAlgo::CompareResults cr;
+                yee_failures = ImageBufAlgo::compare_Yee (img0, img1, cr);
+            }
 
             if (cr.nfail > (failpercent/100.0 * npels) || cr.maxerror > hardfail ||
                 yee_failures > (failpercent/100.0 * npels)) {
@@ -325,29 +325,14 @@ main (int argc, char *argv[])
             // right now, because ImageBuf doesn't really know how to
             // write subimages.
             if (diffimage.size() && (cr.maxerror != 0 || !outdiffonly)) {
-                ImageBuf diff (diffimage, img0.spec());
-                ImageBuf::ConstIterator<float,float> pix0 (img0);
-                ImageBuf::ConstIterator<float,float> pix1 (img1);
-                ImageBuf::Iterator<float,float> pixdiff (diff);
-                // Subtract the second image from the first.  At which
-                // time we no longer need the second image, so free it.
-                if (diffabs) {
-                    for (  ;  pix0.valid();  ++pix0) {
-                        pix1.pos (pix0.x(), pix0.y());  // ensure alignment
-                        pixdiff.pos (pix0.x(), pix0.y());
-                        for (int c = 0;  c < img0.nchannels();  ++c)
-                            pixdiff[c] = diffscale * fabsf (pix0[c] - pix1[c]);
-                    }
-                } else {
-                    for (  ;  pix0.valid();  ++pix0) {
-                        pix1.pos (pix0.x(), pix0.y());  // ensure alignment
-                        pixdiff.pos (pix0.x(), pix0.y());
-                        for (int c = 0;  c < img0.spec().nchannels;  ++c)
-                            pixdiff[c] = diffscale * (pix0[c] - pix1[c]);
-                    }
-                }
-
-                diff.save (diffimage);
+                ImageBuf diff;
+                if (diffabs)
+                    ImageBufAlgo::absdiff (diff, img0, img1);
+                else
+                    ImageBufAlgo::sub (diff, img0, img1);
+                if (diffscale != 1.0f)
+                    ImageBufAlgo::mul (diff, diff, diffscale);
+                diff.write (diffimage);
 
                 // Clear diff image name so we only save the first
                 // non-matching subimage.

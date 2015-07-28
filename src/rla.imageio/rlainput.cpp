@@ -33,11 +33,11 @@
 #include <cmath>
 #include <cassert>
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "filesystem.h"
-#include "fmath.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
 
 #include "rla_pvt.h"
 
@@ -449,7 +449,7 @@ RLAInput::decode_rle_span (unsigned char *buf, int n, int stride,
 {
     size_t e = 0;
     while (n > 0 && e < elen) {
-        char count = encoded[e++];
+        signed char count = (signed char) encoded[e++];
         if (count >= 0) {
             // run count positive: value repeated count+1 times
             for (int i = 0;  i <= count && n;  ++i, buf += stride, --n)

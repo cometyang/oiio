@@ -41,10 +41,11 @@
 #include <boost/foreach.hpp>
 #include <boost/filesystem.hpp>
 
-#include "argparse.h"
-#include "imageio.h"
-#include "sysutil.h"
-#include "filesystem.h"
+#include "OpenImageIO/argparse.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/sysutil.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/imagecache.h"
 
 
 OIIO_NAMESPACE_USING;
@@ -394,6 +395,27 @@ convert_file (const std::string &in_filename, const std::string &out_filename)
         return false;
     }
 
+    // In order to deal with formats that support subimages, but not
+    // subimage appending, we gather them all first.
+    std::vector<ImageSpec> subimagespecs;
+    if (out->supports("multiimage") && !out->supports("appendsubimage")) {
+        ImageCache *imagecache = ImageCache::create ();
+        int nsubimages = 0;
+        ustring ufilename (in_filename);
+        imagecache->get_image_info (ufilename, 0, 0, ustring("subimages"),
+                                    TypeDesc::TypeInt, &nsubimages);
+        if (nsubimages > 1) {
+            subimagespecs.resize (nsubimages);
+            for (int i = 0;  i < nsubimages;  ++i) {
+                ImageSpec inspec = *imagecache->imagespec (ufilename, i, 0,
+                                                           true /*native*/);
+                subimagespecs[i] = inspec;
+                adjust_spec (in, out, inspec, subimagespecs[i]);
+            }
+        }
+        ImageCache::destroy (imagecache);
+    }
+
     bool ok = true;
     bool mip_to_subimage_warning = false;
     for (int subimage = 0;
@@ -413,11 +435,13 @@ convert_file (const std::string &in_filename, const std::string &out_filename)
             ImageSpec outspec = inspec;
             bool nocopy = adjust_spec (in, out, inspec, outspec);
         
-            ImageOutput::OpenMode mode;
             if (miplevel > 0) {
+                // Moving to next MIP level
+                ImageOutput::OpenMode mode;
                 if (out->supports ("mipmap"))
                     mode = ImageOutput::AppendMIPLevel;
-                else if (out->supports ("multiimage")) {
+                else if (out->supports ("multiimage") &&
+                         out->supports ("appendsubimage")) {
                     mode = ImageOutput::AppendSubimage; // use if we must
                     if (! mip_to_subimage_warning
                         && strcmp(out->format_name(),"tiff")) {
@@ -432,14 +456,21 @@ convert_file (const std::string &in_filename, const std::string &out_filename)
                     std::cerr << "\tOnly the first level has been copied.\n";
                     break;  // on to the next subimage
                 }
+                ok = out->open (tempname.c_str(), outspec, mode);
+            } else if (subimage > 0) {
+                // Moving to next subimage
+                ok = out->open (tempname.c_str(), outspec,
+                                ImageOutput::AppendSubimage);
+            } else {
+                // First time opening
+                if (subimagespecs.size())
+                    ok = out->open (tempname.c_str(), int(subimagespecs.size()),
+                                    &subimagespecs[0]);
+                else
+                    ok = out->open (tempname.c_str(), outspec, ImageOutput::Create);
             }
-            else if (subimage > 0)
-                mode = ImageOutput::AppendSubimage;
-            else
-                mode = ImageOutput::Create;
-
-            if (! out->open (tempname.c_str(), outspec, mode)) {
-                std::string err = geterror();
+            if (! ok) {
+                std::string err = out->geterror();
                 std::cerr << "iconvert ERROR: " 
                           << (err.length() ? err : Strutil::format("Could not open \"%s\"", out_filename))
                           << "\n";
@@ -487,11 +518,11 @@ convert_file (const std::string &in_filename, const std::string &out_filename)
 
     if (out_filename != tempname) {
         if (ok) {
-            boost::filesystem::remove (out_filename);
+            Filesystem::remove (out_filename);
             boost::filesystem::rename (tempname, out_filename);
         }
         else
-            boost::filesystem::remove (tempname);
+            Filesystem::remove (tempname);
     }
 
     // If user requested, try to adjust the file's modification time to
@@ -507,6 +538,7 @@ convert_file (const std::string &in_filename, const std::string &out_filename)
 int
 main (int argc, char *argv[])
 {
+    Filesystem::convert_native_arguments (argc, (const char **)argv);
     getargs (argc, argv);
 
     OIIO::attribute ("threads", nthreads);

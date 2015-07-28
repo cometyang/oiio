@@ -39,7 +39,6 @@
 #include <vector>
 
 #include <boost/foreach.hpp>
-#include <boost/filesystem.hpp>
 
 #include <QtCore/QSettings>
 #include <QtCore/QTimer>
@@ -59,13 +58,13 @@
 
 #include <OpenEXR/ImathFun.h>
 
-#include "dassert.h"
-#include "strutil.h"
-#include "timer.h"
-#include "fmath.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/timer.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/sysutil.h"
+#include "OpenImageIO/filesystem.h"
 #include "ivutils.h"
-#include "sysutil.h"
-#include "filesystem.h"
 
 
 namespace
@@ -79,16 +78,17 @@ namespace
 
 
 static const char *s_file_filters = ""
-    "Image Files (*.bmp *.cin *.dds *.dpx *.f3d *.fits *.hdr *.ico *.iff *.jpg "
-    "*.jpe *.jpeg *.jif *.jfif *.jfi *.jp2 *.j2k *.exr *.png *.pbm *.pgm *.ppm "
-    "*.ptex *.rla *.sgi *.rgb *.rgba *.bw *.int *.inta *.pic *.tga *.tpic "
-    "*.tif *.tiff *.tx *.env *.sm *.vsm *.zfile);;"
+    "Image Files (*.bmp *.cin *.dds *.dpx *.f3d *.fits *.gif *.hdr *.ico *.iff "
+    "*.jpg *.jpe *.jpeg *.jif *.jfif *.jfi *.jp2 *.j2k *.exr *.png *.pbm *.pgm "
+    "*.ppm *.ptex *.rla *.sgi *.rgb *.rgba *.bw *.int *.inta *.pic *.tga "
+    "*.tpic *.tif *.tiff *.tx *.env *.sm *.vsm *.zfile);;"
     "BMP (*.bmp);;"
     "Cineon (*.cin);;"
     "Direct Draw Surface (*.dds);;"
     "DPX (*.dpx);;"
     "Field3D (*.f3d);;"
     "FITS (*.fits);;"
+    "GIF (*.gif);;"
     "HDR/RGBE (*.hdr);;"
     "Icon (*.ico);;"
     "IFF (*.iff);;"
@@ -763,8 +763,8 @@ ImageViewer::add_image (const std::string &filename)
     if (filename.empty())
         return;
     IvImage *newimage = new IvImage(filename);
-    newimage->gamma (m_default_gamma);
     ASSERT (newimage);
+    newimage->gamma (m_default_gamma);
     m_images.push_back (newimage);
     addRecentFile (filename);
     updateRecentFilesMenu ();
@@ -802,7 +802,7 @@ ImageViewer::saveAs()
                                          tr(s_file_filters));
     if (name.isEmpty())
         return;
-    bool ok = img->save (name.toStdString(), "", image_progress_callback, this);
+    bool ok = img->write (name.toStdString(), "", image_progress_callback, this);
     if (! ok) {
         std::cerr << "Save failed: " << img->geterror() << "\n";
     }
@@ -821,7 +821,7 @@ ImageViewer::saveWindowAs()
                                          QString(img->name().c_str()));
     if (name.isEmpty())
         return;
-    img->save (name.toStdString(), "", image_progress_callback, this);  // FIXME
+    img->write (name.toStdString(), "", image_progress_callback, this);  // FIXME
 }
 
 
@@ -837,7 +837,7 @@ ImageViewer::saveSelectionAs()
                                          QString(img->name().c_str()));
     if (name.isEmpty())
         return;
-    img->save (name.toStdString(), "", image_progress_callback, this);  // FIXME
+    img->write (name.toStdString(), "", image_progress_callback, this);  // FIXME
 }
 
 
@@ -1430,7 +1430,7 @@ compImageDate (IvImage *first, IvImage *second)
             if (metadatatime.empty()){
                 if (! Filesystem::exists (first->name ()))
                     return false;
-                firstFile = boost::filesystem::last_write_time (first->name ());
+                firstFile = Filesystem::last_write_time (first->name ());
             }
         }
         else
@@ -1444,7 +1444,7 @@ compImageDate (IvImage *first, IvImage *second)
             if (metadatatime.empty()){
                 if (! Filesystem::exists (second->name ()))
                     return true;
-                secondFile = boost::filesystem::last_write_time (second->name());
+                secondFile = Filesystem::last_write_time (second->name());
             }
         }
         else
@@ -1480,10 +1480,10 @@ compFileDate (IvImage *first, IvImage *second)
     double diff;
     if (! Filesystem::exists (first->name ()))
         return false;
-    firstFile = boost::filesystem::last_write_time (first->name ());
+    firstFile = Filesystem::last_write_time (first->name());
     if (! Filesystem::exists (second->name ()))
         return true;
-    secondFile = boost::filesystem::last_write_time (second->name ());
+    secondFile = Filesystem::last_write_time (second->name());
     diff = difftime(firstFile, secondFile);
     if (diff == 0)
         return compName(first, second);

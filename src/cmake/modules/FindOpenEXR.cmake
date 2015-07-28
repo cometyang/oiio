@@ -9,6 +9,10 @@
 #   - Set the variable OPENEXR_CUSTOM to True
 #   - Set the variable OPENEXR_CUSTOM_LIBRARY to the name of the library to
 #     use, e.g. "SpiIlmImf"
+#   - Optionally set the variable OPENEXR_CUSTOM_INCLUDE_DIR to any
+#     particularly weird place that the OpenEXR/*.h files may be found
+#   - Optionally set the variable OPENEXR_CUSTOM_LIB_DIR to any
+#     particularly weird place that the libraries files may be found
 #
 # This module defines the following variables:
 #
@@ -22,6 +26,14 @@
 include (FindPackageHandleStandardArgs)
 include (FindPackageMessage)
 
+if( OPENEXR_USE_STATIC_LIBS )
+  set( _openexr_ORIG_CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
+  if(WIN32)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .lib .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+  else()
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a )
+  endif()
+endif()
 
 # Macro to assemble a helper state variable
 macro (SET_STATE_VAR varname)
@@ -57,8 +69,11 @@ endmacro ()
 # variable names to the specified list
 macro (PREFIX_FIND_LIB prefix libname libpath_var liblist_var cachelist_var)
   string (TOUPPER ${prefix}_${libname} tmp_prefix)
+  # Handle new library names for OpenEXR 2.1 build via cmake
+  string(REPLACE "." "_" _ILMBASE_VERSION ${ILMBASE_VERSION})
+  string(SUBSTRING ${_ILMBASE_VERSION} 0 3 _ILMBASE_VERSION )
   find_library(${tmp_prefix}_LIBRARY_RELEASE
-    NAMES ${libname}
+    NAMES ${libname} ${libname}-${_ILMBASE_VERSION}
     HINTS ${${libpath_var}}
     PATH_SUFFIXES lib
     ${OPENEXR_FIND_OPTIONS}
@@ -97,24 +112,20 @@ if (OPENEXR_CACHED_STATE AND
   endforeach ()
 endif ()
 
-if (OPENEXR_CUSTOM)
-  if (NOT OPENEXR_CUSTOM_LIBRARY)
-    message (FATAL_ERROR "Custom OpenEXR library requested but OPENEXR_CUSTOM_LIBRARY is not set.")
-  endif()
-  set (OpenEXR_Library ${OPENEXR_CUSTOM_LIBRARY})
-else ()
-  set (OpenEXR_Library IlmImf)
-endif ()
-
 # Generic search paths
 set (OpenEXR_generic_include_paths
+  ${OPENEXR_CUSTOM_INCLUDE_DIR}
   /usr/include
+  /usr/include/${CMAKE_LIBRARY_ARCHITECTURE}
   /usr/local/include
   /sw/include
   /opt/local/include)
 set (OpenEXR_generic_library_paths
+  ${OPENEXR_CUSTOM_LIB_DIR}
   /usr/lib
+  /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}
   /usr/local/lib
+  /usr/local/lib/${CMAKE_LIBRARY_ARCHITECTURE}
   /sw/lib
   /opt/local/lib)
 
@@ -147,11 +158,38 @@ list (APPEND OpenEXR_library_paths ${OpenEXR_generic_library_paths})
 PREFIX_FIND_INCLUDE_DIR (OpenEXR
   OpenEXR/ImfArray.h OpenEXR_include_paths)
 
-# If the headers were found, add its parent to the list of lib directories
 if (OPENEXR_INCLUDE_DIR)
-  get_filename_component (tmp_extra_dir "${OPENEXR_INCLUDE_DIR}/../" ABSOLUTE)
-  list (APPEND OpenEXR_library_paths ${tmp_extra_dir})
-  unset (tmp_extra_dir)
+  # Get the version from config file, if not already set.
+  if (NOT OPENEXR_VERSION)
+    FILE(STRINGS "${OPENEXR_INCLUDE_DIR}/OpenEXR/OpenEXRConfig.h" OPENEXR_BUILD_SPECIFICATION
+         REGEX "^[ \t]*#define[ \t]+OPENEXR_VERSION_STRING[ \t]+\"[.0-9]+\".*$")
+
+    if(OPENEXR_BUILD_SPECIFICATION)
+      if (NOT OpenEXR_FIND_QUIETLY)
+        message(STATUS "${OPENEXR_BUILD_SPECIFICATION}")
+      endif ()
+      string(REGEX REPLACE ".*#define[ \t]+OPENEXR_VERSION_STRING[ \t]+\"([.0-9]+)\".*"
+             "\\1" XYZ ${OPENEXR_BUILD_SPECIFICATION})
+      set("OPENEXR_VERSION" ${XYZ} CACHE STRING "Version of OpenEXR lib")
+    else()
+      # Old versions (before 2.0?) do not have any version string, just assuming 2.0 should be fine though. 
+      message(WARNING "Could not determine ILMBase library version, assuming 2.0.")
+      set("OPENEXR_VERSION" "2.0" CACHE STRING "Version of OpenEXR lib")
+    endif()
+  endif()
+endif ()
+
+if (OPENEXR_CUSTOM)
+  if (NOT OPENEXR_CUSTOM_LIBRARY)
+    message (FATAL_ERROR "Custom OpenEXR library requested but OPENEXR_CUSTOM_LIBRARY is not set.")
+  endif()
+  set (OpenEXR_Library ${OPENEXR_CUSTOM_LIBRARY})
+else ()
+#elseif (${OPENEXR_VERSION} VERSION_LESS "2.1")
+  set (OpenEXR_Library IlmImf)
+#else ()
+#  string(REGEX REPLACE "([0-9]+)[.]([0-9]+).*" "\\1_\\2" _openexr_libs_ver ${OPENEXR_VERSION})
+#  set (OpenEXR_Library IlmImf-${_openexr_libs_ver})
 endif ()
 
 # Locate the OpenEXR library
@@ -182,13 +220,18 @@ if (OPENEXR_FOUND)
     list (APPEND OPENEXR_LIBRARIES ${${tmplib}})
   endforeach ()
   list (APPEND OPENEXR_LIBRARIES ${ZLIB_LIBRARIES})
-  if (VERBOSE)
+  if (NOT OpenEXR_FIND_QUIETLY)
     FIND_PACKAGE_MESSAGE (OPENEXR
       "Found OpenEXR: ${OPENEXR_LIBRARIES}"
       "[${OPENEXR_INCLUDE_DIR}][${OPENEXR_LIBRARIES}][${OPENEXR_CURRENT_STATE}]"
       )
   endif ()
 endif ()
+
+# Restore the original find library ordering
+if( OPENEXR_USE_STATIC_LIBS )
+  set(CMAKE_FIND_LIBRARY_SUFFIXES ${_openexr_ORIG_CMAKE_FIND_LIBRARY_SUFFIXES})
+endif()
 
 # Unset the helper variables to avoid pollution
 unset (OPENEXR_CURRENT_STATE)

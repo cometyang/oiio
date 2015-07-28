@@ -42,10 +42,10 @@
 #include <boost/filesystem.hpp>
 using namespace boost::filesystem;
 
-#include "argparse.h"
-#include "strutil.h"
-#include "filesystem.h"
-#include "imageio.h"
+#include "OpenImageIO/argparse.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/imageio.h"
 
 OIIO_NAMESPACE_USING;
 
@@ -157,6 +157,7 @@ parse_files (int argc, const char *argv[])
 int
 main (int argc, const char *argv[])
 {
+    Filesystem::convert_native_arguments (argc, argv);
     ArgParse ap;
     ap.options ("igrep -- search images for matching metadata\n"
                 OIIO_INTRO_STRING "\n"

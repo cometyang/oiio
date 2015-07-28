@@ -7,8 +7,17 @@
 # include <endian.h>    /* attempt to define endianness */
 #endif
 
-#include "fmath.h"
-#include "hash.h"
+#if defined(_MSC_VER) && _MSC_VER < 1600
+  typedef __int8            int8_t;
+  typedef __int16           int16_t;
+  typedef __int32           int32_t;
+  typedef __int64           int64_t;
+#else
+# include <stdint.h>
+#endif
+
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/hash.h"
 
 OIIO_NAMESPACE_ENTER {
 
@@ -59,8 +68,9 @@ namespace xxhash {
 #define inline __forceinline // Visual is not C99, but supports some kind of inline
 #endif
 
-// GCC does not support _rotl outside of Windows
-#if !defined(_WIN32)
+// Check for support of _rotl 
+// Not required for GCC 4.9x with -std=c++11
+#ifndef _rotl
 #define _rotl(x,r) ((x << r) | (x >> (32 - r)))
 #endif
 

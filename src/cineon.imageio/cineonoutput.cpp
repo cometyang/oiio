@@ -30,9 +30,9 @@
 
 #include "libcineon/Cineon.h"
 
-#include "typedesc.h"
-#include "imageio.h"
-#include "fmath.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/fmath.h"
 
 using namespace cineon;
 
@@ -44,10 +44,6 @@ public:
     CineonOutput ();
     virtual ~CineonOutput ();
     virtual const char * format_name (void) const { return "cineon"; }
-    virtual bool supports (const std::string &feature) const {
-        // Support nothing nonstandard
-        return false;
-    }
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        ImageOutput::OpenMode mode);
     virtual bool close ();

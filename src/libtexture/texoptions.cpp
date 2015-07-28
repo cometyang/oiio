@@ -31,15 +31,14 @@
 #include <string>
 #include <boost/scoped_ptr.hpp>
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "varyingref.h"
-#include "ustring.h"
-#include "thread.h"
-#include "fmath.h"
-#include "imageio.h"
-
-#include "texture.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/varyingref.h"
+#include "OpenImageIO/ustring.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/fmath.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/texture.h"
 
 
 OIIO_NAMESPACE_ENTER
@@ -58,7 +57,8 @@ static int   default_samples = 1;
 static const ustring wrap_type_name[] = {
     // MUST match the order of TextureOptions::Wrap
     ustring("default"), ustring("black"), ustring("clamp"),
-    ustring("periodic"), ustring("mirror"),
+    ustring("periodic"), ustring("mirror"), ustring("periodic_pow2"),
+    ustring("periodic_sharedborder"),
     ustring()
 };
 
@@ -69,7 +69,7 @@ static const ustring wrap_type_name[] = {
 /// Special private ctr that makes a canonical default TextureOptions.
 /// For use internal to libtexture.  Users, don't call this!
 TextureOptions::TextureOptions ()
-    : firstchannel(0), nchannels(1), subimage(0),
+    : firstchannel(0), subimage(0),
       swrap(TextureOptions::WrapDefault), twrap(TextureOptions::WrapDefault),
       mipmode(TextureOptions::MipModeDefault),
       interpmode(TextureOptions::InterpSmartBicubic),
@@ -81,18 +81,15 @@ TextureOptions::TextureOptions ()
       fill(default_fill),
       missingcolor(NULL),
       samples(default_samples),
-      dresultds(NULL), dresultdt(NULL),
       rwrap(TextureOptions::WrapDefault),
-      rblur(default_blur), rwidth(default_width),
-      dresultdr(NULL),
-      swrap_func(NULL), twrap_func(NULL), rwrap_func(NULL)
+      rblur(default_blur), rwidth(default_width)
 {
 }
 
 
 
 TextureOptions::TextureOptions (const TextureOpt &opt)
-    : firstchannel(opt.firstchannel), nchannels(opt.nchannels),
+    : firstchannel(opt.firstchannel),
       subimage(opt.subimage), subimagename(opt.subimagename),
       swrap((Wrap)opt.swrap), twrap((Wrap)opt.twrap),
       mipmode((MipMode)opt.mipmode),
@@ -106,18 +103,15 @@ TextureOptions::TextureOptions (const TextureOpt &opt)
       fill((float *)&opt.fill),
       missingcolor((void *)opt.missingcolor),
       samples((int *)&opt.samples),
-      dresultds((float *)opt.dresultds), dresultdt((float *)opt.dresultdt),
       rwrap((Wrap)opt.rwrap), rblur((float *)&opt.rblur),
-      rwidth((float *)&opt.rwidth),
-      dresultdr((float *)opt.dresultdr),
-      swrap_func(NULL), twrap_func(NULL), rwrap_func(NULL)
+      rwidth((float *)&opt.rwidth)
 {
 }
 
 
 
 TextureOpt::TextureOpt (const TextureOptions &opt, int index)
-    : nchannels(opt.nchannels), firstchannel(opt.firstchannel),
+    : firstchannel(opt.firstchannel),
       subimage(opt.subimage), subimagename(opt.subimagename),
       swrap((Wrap)opt.swrap), twrap((Wrap)opt.twrap),
       mipmode((MipMode)opt.mipmode),
@@ -128,14 +122,11 @@ TextureOpt::TextureOpt (const TextureOptions &opt, int index)
       swidth(opt.swidth[index]), twidth(opt.twidth[index]),
       fill(opt.fill[index]),
       missingcolor(opt.missingcolor.ptr() ? &opt.missingcolor[index] : NULL),
-      dresultds(opt.dresultds), dresultdt(opt.dresultdt),
       time(opt.time[index]),
       bias(opt.bias[index]),
       samples(opt.samples[index]),
       rwrap((Wrap)opt.rwrap),
       rblur(opt.rblur[index]), rwidth(opt.rwidth[index]),
-      dresultdr(opt.dresultdr),
-      swrap_func(NULL), twrap_func(NULL), rwrap_func(NULL),
       envlayout(0)
 {
 }

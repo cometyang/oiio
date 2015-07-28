@@ -42,17 +42,17 @@
 #include <boost/tokenizer.hpp>
 #include <boost/foreach.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/regex.hpp>
 
 using boost::algorithm::iequals;
 
 
-#include "argparse.h"
-#include "imageio.h"
-#include "imagebuf.h"
-#include "imagebufalgo.h"
-#include "sysutil.h"
-#include "filesystem.h"
-#include "filter.h"
+#include "OpenImageIO/argparse.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/imagebuf.h"
+#include "OpenImageIO/imagebufalgo.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/filter.h"
 
 #include "oiiotool.h"
 
@@ -71,12 +71,12 @@ ImageRec::ImageRec (const std::string &name, int nsubimages,
     int specnum = 0;
     m_subimages.resize (nsubimages);
     for (int s = 0;  s < nsubimages;  ++s) {
-        int mips = miplevels ? miplevels[s] : 1;
-        m_subimages[s].m_miplevels.resize (mips);
-        m_subimages[s].m_specs.resize (mips);
-        for (int m = 0;  m < mips;  ++m) {
-            ImageBuf *ib = specs ? new ImageBuf (name, specs[specnum])
-                                 : new ImageBuf (name);
+        int nmips = miplevels ? miplevels[s] : 1;
+        m_subimages[s].m_miplevels.resize (nmips);
+        m_subimages[s].m_specs.resize (nmips);
+        for (int m = 0;  m < nmips;  ++m) {
+            ImageBuf *ib = specs ? new ImageBuf (specs[specnum])
+                                 : new ImageBuf ();
             m_subimages[s].m_miplevels[m].reset (ib);
             if (specs)
                 m_subimages[s].m_specs[m] = specs[specnum];
@@ -110,7 +110,7 @@ ImageRec::ImageRec (ImageRec &img, int subimage_to_copy,
             ImageBuf *ib = NULL;
             if (writable || img.pixels_modified() || !copy_pixels) {
                 // Make our own copy of the pixels
-                ib = new ImageBuf (img.name(), srcspec);
+                ib = new ImageBuf (srcspec);
                 if (copy_pixels)
                     ib->copy_pixels (srcib);
             } else {
@@ -178,7 +178,7 @@ ImageRec::ImageRec (ImageRec &A, ImageRec &B, int subimage_to_copy,
         spec.channelnames.resize (spec.nchannels);
         spec.channelformats.clear ();
 
-        ImageBuf *ib = new ImageBuf ("", spec);
+        ImageBuf *ib = new ImageBuf (spec);
 
         m_subimages[s].m_miplevels[0].reset (ib);
         m_subimages[s].m_specs[0] = spec;
@@ -217,7 +217,7 @@ ImageRec::ImageRec (const std::string &name, const ImageSpec &spec,
         m_subimages[s].m_miplevels.resize (miplevels);
         m_subimages[s].m_specs.resize (miplevels);
         for (int m = 0;  m < miplevels;  ++m) {
-            ImageBuf *ib = new ImageBuf (name, spec);
+            ImageBuf *ib = new ImageBuf (spec);
             m_subimages[s].m_miplevels[m].reset (ib);
             m_subimages[s].m_specs[m] = spec;
         }
@@ -227,20 +227,22 @@ ImageRec::ImageRec (const std::string &name, const ImageSpec &spec,
 
 
 bool
-ImageRec::read ()
+ImageRec::read (bool force_native_read)
 {
     if (elaborated())
         return true;
     static ustring u_subimages("subimages"), u_miplevels("miplevels");
+    static boost::regex regex_sha ("SHA-1=[[:xdigit:]]*[ ]*");
     int subimages = 0;
     ustring uname (name());
     if (! m_imagecache->get_image_info (uname, 0, 0, u_subimages,
                                         TypeDesc::TypeInt, &subimages)) {
-        std::cerr << "ERROR: file \"" << name() << "\" not found.\n";
+        error ("file not found: \"%s\"", name());
         return false;  // Image not found
     }
     m_subimages.resize (subimages);
 
+    bool allok = true;
     for (int s = 0;  s < subimages;  ++s) {
         int miplevels = 0;
         m_imagecache->get_image_info (uname, s, 0, u_miplevels,
@@ -258,9 +260,22 @@ ImageRec::read ()
             bool forceread = (s == 0 && m == 0 &&
                               m_imagecache->imagespec(uname,s,m)->image_bytes() < 50*1024*1024);
             ImageBuf *ib = new ImageBuf (name(), m_imagecache);
-            bool ok = ib->read (s, m, forceread,
-                                TypeDesc::FLOAT /* force float */);
-            ASSERT (ok);
+            TypeDesc convert = TypeDesc::FLOAT;
+            if (force_native_read) {
+                forceread = true;
+                convert = ib->nativespec().format;
+            }
+            bool ok = ib->read (s, m, forceread, convert);
+            if (!ok)
+                error ("%s", ib->geterror());
+            allok &= ok;
+            // Remove any existing SHA-1 hash from the spec.
+            ib->specmod().erase_attribute ("oiio:SHA-1");
+            std::string desc = ib->spec().get_string_attribute ("ImageDescription");
+            if (desc.size())
+                ib->specmod().attribute ("ImageDescription",
+                                         boost::regex_replace (desc, regex_sha, ""));
+
             m_subimages[s].m_miplevels[m].reset (ib);
             m_subimages[s].m_specs[m] = ib->spec();
             // For ImageRec purposes, we need to restore a few of the
@@ -275,5 +290,46 @@ ImageRec::read ()
 
     m_time = Filesystem::last_write_time (name());
     m_elaborated = true;
-    return true;
+    return allok;
 }
+
+
+namespace {
+static spin_mutex err_mutex;
+}
+
+
+
+bool
+ImageRec::has_error () const
+{
+    spin_lock lock (err_mutex);
+    return ! m_err.empty();
+}
+
+
+
+std::string
+ImageRec::geterror (bool clear_error) const
+{
+    spin_lock lock (err_mutex);
+    std::string e = m_err;
+    if (clear_error)
+        m_err.clear();
+    return e;
+}
+
+
+
+void
+ImageRec::append_error (string_view message) const
+{
+    spin_lock lock (err_mutex);
+    ASSERT (m_err.size() < 1024*1024*16 &&
+            "Accumulated error messages > 16MB. Try checking return codes!");
+    if (m_err.size() && m_err[m_err.size()-1] != '\n')
+        m_err += '\n';
+    m_err += message;
+}
+
+

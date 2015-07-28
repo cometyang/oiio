@@ -34,10 +34,10 @@
 
 #include "dds_pvt.h"
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "imageio.h"
-#include "fmath.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/fmath.h"
 
 #include "squish/squish.h"
 
@@ -398,14 +398,15 @@ DDSInput::internal_seek_subimage (int cubeface, int miplevel, unsigned int& w,
 bool
 DDSInput::seek_subimage (int subimage, int miplevel, ImageSpec &newspec)
 {
+    if (subimage != 0)
+        return false;
+
     // early out
     if (subimage == current_subimage() && miplevel == current_miplevel()) {
         newspec = m_spec;
         return true;
     }
 
-    if (subimage != 0)
-        return false;
     // don't seek if the image doesn't contain mipmaps, isn't 3D or a cube map,
     // and don't seek out of bounds
     if (miplevel < 0 || (!(m_dds.caps.flags1 & DDS_CAPS1_COMPLEX) && miplevel != 0)
@@ -667,7 +668,7 @@ DDSInput::read_native_tile (int x, int y, int z, void *data)
         lastx = x;
         lasty = y;
         lastz = z;
-        unsigned int w, h, d;
+        unsigned int w = 0, h = 0, d = 0;
 #ifdef DDS_3X2_CUBE_MAP_LAYOUT
         internal_seek_subimage (((x / m_spec.tile_width) << 1)
                                 + y / m_spec.tile_height,

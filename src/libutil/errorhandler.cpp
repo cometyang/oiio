@@ -34,9 +34,9 @@
 #include <iostream>
 #include <string>
 
-#include "strutil.h"
-#include "errorhandler.h"
-#include "thread.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/errorhandler.h"
+#include "OpenImageIO/thread.h"
 
 
 
@@ -48,7 +48,7 @@ OIIO_NAMESPACE_ENTER
 namespace {
 static ErrorHandler default_handler_instance;
 static mutex err_mutex;
-};
+}
 
 
 ErrorHandler &

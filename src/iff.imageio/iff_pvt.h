@@ -34,9 +34,9 @@
 //                   Autodesk Maya documentation, ilib.h
 
 #include <cstdio>
-#include "imageio.h"
-#include "filesystem.h"
-#include "fmath.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
 
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
@@ -167,9 +167,7 @@ private:
     bool readimg (void);
     
     // helper to uncompress a rle channel
-    size_t uncompress_rle_channel(
-        const uint8_t * in, uint8_t * out, int size
-    );
+    size_t uncompress_rle_channel(const uint8_t *in, uint8_t * out, int size);
 };
 
 
@@ -179,7 +177,7 @@ public:
     IffOutput () { init (); }
     virtual ~IffOutput () { close (); }
     virtual const char *format_name (void) const { return "iff"; }
-    virtual bool supports (const std::string &feature) const;
+    virtual int supports (string_view feature) const;
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        OpenMode mode);
     virtual bool close (void);
@@ -193,26 +191,22 @@ private:
     std::string m_filename;
     iff_pvt::IffFileHeader m_iff_header;
     std::vector<uint8_t> m_buf;
-    
+    unsigned int m_dither;
+    std::vector<uint8_t> scratch;    
+
     void init (void) {
         m_fd = NULL;
         m_filename.clear ();
     }
     
     // helper to compress verbatim
-    void compress_verbatim (
-        const uint8_t *& in, uint8_t *& out, int size
-    );
+    void compress_verbatim (const uint8_t *& in, uint8_t *& out, int size);
       
     // helper to compress duplicate
-    void compress_duplicate (
-        const uint8_t *&in, uint8_t *& out, int size
-    );
+    void compress_duplicate (const uint8_t *&in, uint8_t *& out, int size);
       
     // helper to compress a rle channel
-    size_t compress_rle_channel (
-        const uint8_t *in, uint8_t *out, int size
-    );
+    size_t compress_rle_channel (const uint8_t *in, uint8_t *out, int size);
 };
 
 OIIO_PLUGIN_NAMESPACE_END

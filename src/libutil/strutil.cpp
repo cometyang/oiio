@@ -55,13 +55,33 @@
 #include <shellapi.h>
 #endif
 
-#include "dassert.h"
-
-#include "strutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/strutil.h"
+#include "OpenImageIO/ustring.h"
+#include "OpenImageIO/string_view.h"
 
 
 OIIO_NAMESPACE_ENTER
 {
+
+
+const char *
+string_view::c_str() const
+{
+    // Usual case: either empty, or null-terminated
+    if (m_len == 0)   // empty string
+        return "";
+    else if (m_chars[m_len] == 0)  // 0-terminated
+        return m_chars;
+    // Rare case: may not be 0-terminated. Bite the bullet and construct a
+    // 0-terminated string.  We use ustring as a way to avoid any issues of
+    // who cleans up the allocation, though it means that it will stay in
+    // the ustring table forever. Punt on this for now, it's an edge case
+    // that we need to handle, but is not likely to ever be an issue.
+    return ustring(m_chars, 0, m_len).c_str();
+}
+
+
 
 std::string
 Strutil::format_raw (const char *fmt, ...)
@@ -203,7 +223,7 @@ Strutil::get_rest_arguments (const std::string &str, std::string &base,
 
 
 std::string
-Strutil::escape_chars (const std::string &unescaped)
+Strutil::escape_chars (string_view unescaped)
 {
     std::string s = unescaped;
     for (size_t i = 0;  i < s.length();  ++i) {
@@ -230,7 +250,7 @@ Strutil::escape_chars (const std::string &unescaped)
 
 
 std::string
-Strutil::unescape_chars (const std::string &escaped)
+Strutil::unescape_chars (string_view escaped)
 {
     std::string s = escaped;
     for (size_t i = 0, len = s.length();  i < len;  ++i) {
@@ -270,21 +290,21 @@ Strutil::unescape_chars (const std::string &escaped)
 
 
 std::string
-Strutil::wordwrap (std::string src, int columns, int prefix)
+Strutil::wordwrap (string_view src, int columns, int prefix)
 {
-    std::ostringstream out;
     if (columns < prefix+20)
         return src;   // give up, no way to make it wrap
+    std::ostringstream out;
     columns -= prefix;  // now columns is the real width we have to work with
     while ((int)src.length() > columns) {
         // break the string in two
         size_t breakpoint = src.find_last_of (' ', columns);
-        if (breakpoint == std::string::npos)
+        if (breakpoint == string_view::npos)
             breakpoint = columns;
         out << src.substr(0, breakpoint) << "\n" << std::string (prefix, ' ');
         src = src.substr (breakpoint);
         while (src[0] == ' ')
-            src.erase (0, 1);
+            src.remove_prefix (1);
     }
     out << src;
     return out.str();
@@ -298,44 +318,51 @@ static std::locale loc = std::locale::classic();
 
 
 bool
-Strutil::iequals (const std::string &a, const std::string &b)
+Strutil::iequals (string_view a, string_view b)
 {
     return boost::algorithm::iequals (a, b, loc);
 }
 
 
 bool
-Strutil::iequals (const char *a, const char *b)
+Strutil::starts_with (string_view a, string_view b)
 {
-    return boost::algorithm::iequals (a, b, loc);
+    return boost::algorithm::starts_with (a, b);
 }
 
 
 bool
-Strutil::istarts_with (const std::string &a, const std::string &b)
+Strutil::istarts_with (string_view a, string_view b)
 {
     return boost::algorithm::istarts_with (a, b, loc);
 }
 
 
 bool
-Strutil::istarts_with (const char *a, const char *b)
+Strutil::ends_with (string_view a, string_view b)
 {
-    return boost::algorithm::istarts_with (a, b, loc);
+    return boost::algorithm::ends_with (a, b);
 }
 
 
 bool
-Strutil::iends_with (const std::string &a, const std::string &b)
+Strutil::iends_with (string_view a, string_view b)
 {
     return boost::algorithm::iends_with (a, b, loc);
 }
 
 
 bool
-Strutil::iends_with (const char *a, const char *b)
+Strutil::contains (string_view a, string_view b)
 {
-    return boost::algorithm::iends_with (a, b, loc);
+    return boost::algorithm::contains (a, b);
+}
+
+
+bool
+Strutil::icontains (string_view a, string_view b)
+{
+    return boost::algorithm::icontains (a, b, loc);
 }
 
 
@@ -354,26 +381,27 @@ Strutil::to_upper (std::string &a)
 
 
 
-std::string
-Strutil::strip (const std::string &str, const std::string &chars)
+string_view
+Strutil::strip (string_view str, string_view chars)
 {
-    const char *stripchars = (chars.empty() ? " \t\n\r\f\v" : chars.c_str());
-    size_t b = str.find_first_not_of (stripchars);
+    if (chars.empty())
+        chars = string_view(" \t\n\r\f\v", 6);
+    size_t b = str.find_first_not_of (chars);
     if (b == std::string::npos)
-        return std::string("");
-    size_t e = str.find_last_not_of (stripchars);
+        return string_view ();
+    size_t e = str.find_last_not_of (chars);
     DASSERT (e != std::string::npos);
-    return std::string (str, b, e-b+1);
+    return str.substr (b, e-b+1);
 }
 
 
 
 static void
-split_whitespace (const std::string &str, std::vector<std::string> &result,
+split_whitespace (string_view str, std::vector<string_view> &result,
                   int maxsplit)
 {
     // Implementation inspired by Pystring
-    std::string::size_type i, j, len = str.size();
+    string_view::size_type i, j, len = str.size();
     for (i = j = 0; i < len; ) {
         while (i < len && ::isspace(str[i]))
             i++;
@@ -381,7 +409,7 @@ split_whitespace (const std::string &str, std::vector<std::string> &result,
         while (i < len && ! ::isspace(str[i]))
             i++;
         if (j < i) {
-            if (maxsplit-- <= 0)
+            if (--maxsplit <= 0)
                 break;
             result.push_back (str.substr(j, i - j));
             while (i < len && ::isspace(str[i]))
@@ -396,8 +424,22 @@ split_whitespace (const std::string &str, std::vector<std::string> &result,
 
 
 void
-Strutil::split (const std::string &str, std::vector<std::string> &result,
-                const std::string &sep, int maxsplit)
+Strutil::split (string_view str, std::vector<std::string> &result,
+                string_view sep, int maxsplit)
+{
+    std::vector<string_view> sr_result;
+    split (str, sr_result, sep, maxsplit);
+    result.clear ();
+    result.reserve (sr_result.size());
+    for (size_t i = 0, e = sr_result.size(); i != e; ++i)
+        result.push_back (sr_result[i]);
+}
+
+
+
+void
+Strutil::split (string_view str, std::vector<string_view> &result,
+                string_view sep, int maxsplit)
 {
     // Implementation inspired by Pystring
     result.clear();
@@ -410,7 +452,7 @@ Strutil::split (const std::string &str, std::vector<std::string> &result,
     size_t i = 0, j = 0, len = str.size(), n = sep.size();
     while (i+n <= len) {
         if (str[i] == sep[0] && str.substr(i, n) == sep) {
-            if (maxsplit-- <= 0)
+            if (--maxsplit <= 0)
                 break;
             result.push_back (str.substr(j, i - j));
             i = j = i + n;
@@ -424,23 +466,36 @@ Strutil::split (const std::string &str, std::vector<std::string> &result,
 
 
 std::string
-Strutil::join (const std::vector<std::string> &seq, const std::string & str)
+Strutil::join (const std::vector<string_view> &seq, string_view str)
 {
     // Implementation inspired by Pystring
     size_t seqlen = seq.size();
     if (seqlen == 0)
-        return "";
+        return std::string();
     std::string result (seq[0]);
-    for (size_t i = 1; i < seqlen; ++i)
-        result += str + seq[i];
+    for (size_t i = 1; i < seqlen; ++i) {
+        result += str;
+        result += seq[i];
+    }
     return result;
+}
+
+
+
+std::string
+Strutil::join (const std::vector<std::string> &seq, string_view str)
+{
+    std::vector<string_view> seq_sr (seq.size());
+    for (size_t i = 0, e = seq.size(); i != e; ++i)
+        seq_sr[i] = seq[i];
+    return join (seq_sr, str);
 }
 
 
 
 #ifdef _WIN32
 std::wstring
-Strutil::utf8_to_utf16 (const std::string& str)
+Strutil::utf8_to_utf16 (string_view str)
 {
     std::wstring native;
     
@@ -464,6 +519,362 @@ Strutil::utf16_to_utf8 (const std::wstring& str)
 }
 #endif
 
+
+
+char *
+Strutil::safe_strcpy (char *dst, const char *src, size_t size)
+{
+    if (src) {
+        for (size_t i = 0;  i < size;  ++i) {
+            if (! (dst[i] = src[i]))
+                return dst;   // finished, and copied the 0 character
+        }
+        // If we got here, we have gotten to the maximum length, and still
+        // no terminating 0, so add it!
+        dst[size-1] = 0;
+    } else {
+        dst[0] = 0;
+    }
+    return dst;
+}
+
+
+
+void
+Strutil::skip_whitespace (string_view &str)
+{
+    while (str.size() && isspace(str[0]))
+        str.remove_prefix (1);
+}
+
+
+
+bool
+Strutil::parse_char (string_view &str, char c,
+                     bool skip_whitespace, bool eat)
+{
+    string_view p = str;
+    if (skip_whitespace)
+        Strutil::skip_whitespace (p);
+    if (p.size() && p[0] == c) {
+        if (eat) {
+            p.remove_prefix (1);
+            str = p;
+        }
+        return true;
+    }
+    return false;
+}
+
+
+
+bool
+Strutil::parse_until_char (string_view &str, char c, bool eat)
+{
+    string_view p = str;
+    while (p.size() && p[0] != c)
+        p.remove_prefix (1);
+    if (eat)
+        str = p;
+    return p.size() && p[0] == c;
+}
+
+
+
+bool
+Strutil::parse_prefix (string_view &str, string_view prefix, bool eat)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    if (Strutil::starts_with (p, prefix)) {
+        p.remove_prefix (prefix.size());
+        if (eat)
+            str = p;
+        return true;
+    }
+    return false;
+}
+
+
+
+bool
+Strutil::parse_int (string_view &str, int &val, bool eat)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    if (! p.size())
+        return false;
+    const char *end = p.begin();
+    int v = strtol (p.begin(), (char**)&end, 10);
+    if (end == p.begin())
+        return false;  // no integer found
+    if (eat) {
+        p.remove_prefix (end-p.begin());
+        str = p;
+    }
+    val = v;
+    return true;
+}
+
+
+
+bool
+Strutil::parse_float (string_view &str, float &val, bool eat)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    if (! p.size())
+        return false;
+    const char *end = p.begin();
+    float v = (float) strtod (p.begin(), (char**)&end);
+    if (end == p.begin())
+        return false;  // no integer found
+    if (eat) {
+        p.remove_prefix (end-p.begin());
+        str = p;
+    }
+    val = v;
+    return true;
+}
+
+
+
+bool
+Strutil::parse_string (string_view &str, string_view &val, bool eat)
+{
+    return parse_string (str, val, eat, DeleteQuotes);
+}
+
+
+
+bool
+Strutil::parse_string (string_view &str, string_view &val,
+                       bool eat, QuoteBehavior keep_quotes)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    bool quoted = parse_char (p, '\"');
+    const char *begin = p.begin(), *end = p.begin();
+    bool escaped = false;
+    while (end != p.end()) {
+        if (isspace(*end) && !quoted)
+            break;   // not quoted and we hit whitespace: we're done
+        if (quoted && *end == '\"' && ! escaped)
+            break;   // closing quite -- we're done (beware embedded quote)
+        if (p[0] == '\\')
+            escaped = true;
+        ++end;
+        escaped = false;
+    }
+    if (quoted && keep_quotes == KeepQuotes) {
+        if (*end == '\"')
+            val = string_view (begin-1, size_t(end-begin)+2);
+        else
+            val = string_view (begin-1, size_t(end-begin)+1);
+    } else {
+        val = string_view (begin, size_t(end-begin));
+    }
+    p.remove_prefix (size_t(end-begin));
+    if (quoted && p.size() && p[0] == '\"')
+        p.remove_prefix (1);  // eat closing quote
+    if (eat)
+        str = p;
+    return quoted || val.size();
+}
+
+
+
+string_view
+Strutil::parse_word (string_view &str, bool eat)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    const char *begin = p.begin(), *end = p.begin();
+    while (end != p.end() && isalpha(*end))
+        ++end;
+    size_t wordlen = end - begin;
+    if (eat && wordlen) {
+        p.remove_prefix (wordlen);
+        str = p;
+    }
+    return string_view (begin, wordlen);
+}
+
+
+
+string_view
+Strutil::parse_identifier (string_view &str, bool eat)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    const char *begin = p.begin(), *end = p.begin();
+    if (end != p.end() && (isalpha(*end) || *end == '_'))
+        ++end;
+    else
+       return string_view();  // not even the start of an identifier
+    while (end != p.end() && (isalpha(*end) || isdigit(*end) || *end == '_'))
+        ++end;
+    if (eat) {
+        p.remove_prefix (size_t(end-begin));
+        str = p;
+    }
+    return string_view (begin, size_t(end-begin));
+}
+
+
+
+string_view
+Strutil::parse_identifier (string_view &str, string_view allowed, bool eat)
+{
+    string_view p = str;
+    skip_whitespace (p);
+    const char *begin = p.begin(), *end = p.begin();
+    if (end != p.end() && (isalpha(*end) || *end == '_' ||
+                           allowed.find(*end) != string_view::npos))
+        ++end;
+    else
+       return string_view();  // not even the start of an identifier
+    while (end != p.end() && (isalpha(*end) || isdigit(*end) || *end == '_' ||
+                              allowed.find(*end) != string_view::npos))
+        ++end;
+    if (eat) {
+        p.remove_prefix (size_t(end-begin));
+        str = p;
+    }
+    return string_view (begin, size_t(end-begin));
+}
+
+
+
+string_view
+Strutil::parse_until (string_view &str, string_view sep, bool eat)
+{
+    string_view p = str;
+    const char *begin = p.begin(), *end = p.begin();
+    while (end != p.end() && sep.find(*end) == string_view::npos)
+        ++end;
+    size_t wordlen = end - begin;
+    if (eat && wordlen) {
+        p.remove_prefix (wordlen);
+        str = p;
+    }
+    return string_view (begin, wordlen);
+}
+
+
+string_view
+Strutil::parse_nested (string_view &str, bool eat)
+{
+    // Make sure we have a valid string and ascertain the characters that
+    // nest and unnest.
+    string_view p = str;
+    if (! p.size())
+        return string_view();    // No proper opening
+    char opening = p[0];
+    char closing = 0;
+    if      (opening == '(') closing = ')';
+    else if (opening == '[') closing = ']';
+    else if (opening == '{') closing = '}';
+    else    return string_view();
+
+    // Walk forward in the string until we exactly unnest compared to the
+    // start.
+    size_t len = 1;
+    int nesting = 1;
+    for ( ; nesting && len < p.size(); ++len) {
+        if (p[len] == opening)
+            ++nesting;
+        else if (p[len] == closing)
+            --nesting;
+    }
+
+    if (nesting)
+        return string_view();    // No proper closing
+
+    ASSERT (p[len-1] == closing);
+
+    // The result is the first len characters
+    string_view result = str.substr (0, len);
+    if (eat)
+        str.remove_prefix (len);
+    return result;
+}
+
+
+
+
+/*
+Copyright for decode function:
+See http://bjoern.hoehrmann.de/utf-8/decoder/dfa/ for details.
+
+Copyright (c) 2008-2009 Bjoern Hoehrmann <bjoern@hoehrmann.de>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to
+deal in the Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
+*/
+
+#define UTF8_ACCEPT 0
+#define UTF8_REJECT 12
+
+static const uint8_t utf8d[] = {
+  // The first part of the table maps bytes to character classes that
+  // to reduce the size of the transition table and create bitmasks.
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,  9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,
+   7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,  7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,
+   8,8,2,2,2,2,2,2,2,2,2,2,2,2,2,2,  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
+  10,3,3,3,3,3,3,3,3,3,3,3,3,4,3,3, 11,6,6,6,5,8,8,8,8,8,8,8,8,8,8,8,
+
+  // The second part is a transition table that maps a combination
+  // of a state of the automaton and a character class to a state.
+   0,12,24,36,60,96,84,12,12,12,48,72, 12,12,12,12,12,12,12,12,12,12,12,12,
+  12, 0,12,12,12,12,12, 0,12, 0,12,12, 12,24,12,12,12,12,12,24,12,24,12,12,
+  12,12,12,12,12,12,12,24,12,12,12,12, 12,24,12,12,12,12,12,12,12,24,12,12,
+  12,12,12,12,12,12,12,36,12,36,12,12, 12,36,12,12,12,12,12,36,12,36,12,12,
+  12,36,12,12,12,12,12,12,12,12,12,12,
+};
+
+inline uint32_t
+decode(uint32_t* state, uint32_t* codep, uint32_t byte)
+{
+  uint32_t type = utf8d[byte];
+  *codep = (*state != UTF8_ACCEPT) ?
+    (byte & 0x3fu) | (*codep << 6) :
+    (0xff >> type) & (byte);
+  *state = utf8d[256 + *state + type];
+  return *state;
+}
+
+void
+Strutil::utf8_to_unicode (string_view &str, std::vector<uint32_t> &uvec)
+{
+    const char* begin = str.begin();
+    const char* end = str.end();
+    uint32_t state = 0;
+    for (; begin != end; ++begin) {
+        uint32_t codepoint;
+        if (!decode(&state, &codepoint, (unsigned char) *begin))
+            uvec.push_back(codepoint);
+    }
+}
 
 }
 OIIO_NAMESPACE_EXIT

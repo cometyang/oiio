@@ -31,10 +31,9 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "dassert.h"
-#include "ustring.h"
-
-#include "paramlist.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/ustring.h"
+#include "OpenImageIO/paramlist.h"
 
 
 OIIO_NAMESPACE_ENTER
@@ -45,10 +44,19 @@ void
 ParamValue::init_noclear (ustring _name, TypeDesc _type,
                           int _nvalues, const void *_value, bool _copy)
 {
+    init_noclear (_name, _type, _nvalues, INTERP_CONSTANT, _value, _copy);
+}
+
+
+
+void
+ParamValue::init_noclear (ustring _name, TypeDesc _type, int _nvalues,
+                          Interp _interp, const void *_value, bool _copy)
+{
     m_name = _name;
     m_type = _type;
     m_nvalues = _nvalues;
-    m_interp = INTERP_CONSTANT;
+    m_interp = _interp;
     size_t n = (size_t) (m_nvalues * m_type.numelements());
     size_t size = (size_t) (m_nvalues * m_type.size());
     bool small = (size <= sizeof(m_data));
@@ -95,6 +103,83 @@ ParamValue::clear_value ()
     m_copy = false;
     m_nonlocal = false;
 }
+
+
+
+ParamValueList::const_iterator
+ParamValueList::find (ustring name, TypeDesc type, bool casesensitive) const
+{
+    if (casesensitive) {
+        for (const_iterator i = cbegin(), e = cend(); i != e; ++i) {
+            if (i->name() == name &&
+                  (type == TypeDesc::UNKNOWN || type == i->type()))
+                return i;
+        }
+    } else {
+        for (const_iterator i = cbegin(), e = cend(); i != e; ++i) {
+            if (Strutil::iequals (i->name(), name) &&
+                  (type == TypeDesc::UNKNOWN || type == i->type()))
+                return i;
+        }
+    }
+    return cend();
+}
+
+
+
+ParamValueList::const_iterator
+ParamValueList::find (string_view name, TypeDesc type, bool casesensitive) const
+{
+    if (casesensitive) {
+        return find (ustring(name), type, casesensitive);
+    } else {
+        for (const_iterator i = cbegin(), e = cend(); i != e; ++i) {
+            if (Strutil::iequals (i->name(), name) &&
+                  (type == TypeDesc::UNKNOWN || type == i->type()))
+                return i;
+        }
+    }
+    return cend();
+}
+
+
+
+ParamValueList::iterator
+ParamValueList::find (ustring name, TypeDesc type, bool casesensitive)
+{
+    if (casesensitive) {
+        for (iterator i = begin(), e = end(); i != e; ++i) {
+            if (i->name() == name &&
+                  (type == TypeDesc::UNKNOWN || type == i->type()))
+                return i;
+        }
+    } else {
+        for (iterator i = begin(), e = end(); i != e; ++i) {
+            if (Strutil::iequals (i->name(), name) &&
+                  (type == TypeDesc::UNKNOWN || type == i->type()))
+                return i;
+        }
+    }
+    return end();
+}
+
+
+
+ParamValueList::iterator
+ParamValueList::find (string_view name, TypeDesc type, bool casesensitive)
+{
+    if (casesensitive) {
+        return find (ustring(name), type, casesensitive);
+    } else {
+        for (iterator i = begin(), e = end(); i != e; ++i) {
+            if (Strutil::iequals (i->name(), name) &&
+                  (type == TypeDesc::UNKNOWN || type == i->type()))
+                return i;
+        }
+    }
+    return end();
+}
+
 
 }
 OIIO_NAMESPACE_EXIT

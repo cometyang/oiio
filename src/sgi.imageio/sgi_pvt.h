@@ -33,9 +33,9 @@
 // Format reference: ftp://ftp.sgi.com/graphics/SGIIMAGESPEC
 
 #include <cstdio>
-#include "imageio.h"
-#include "filesystem.h"
-#include "fmath.h"
+#include "OpenImageIO/imageio.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/fmath.h"
 
 OIIO_PLUGIN_NAMESPACE_BEGIN
 
@@ -141,16 +141,21 @@ class SgiOutput : public ImageOutput {
     SgiOutput () : m_fd(NULL) { }
     virtual ~SgiOutput () { close(); }
     virtual const char *format_name (void) const { return "sgi"; }
-    virtual bool supports (const std::string &feature) const { return false; }
+    virtual int supports (string_view feature) const;
     virtual bool open (const std::string &name, const ImageSpec &spec,
                        OpenMode mode=Create);
     virtual bool close (void);
     virtual bool write_scanline (int y, int z, TypeDesc format, const void *data,
                                  stride_t xstride);
+    virtual bool write_tile (int x, int y, int z, TypeDesc format,
+                             const void *data, stride_t xstride,
+                             stride_t ystride, stride_t zstride);
  private:
     FILE *m_fd;
     std::string m_filename;
     std::vector<unsigned char> m_scratch;
+    unsigned int m_dither;
+    std::vector<unsigned char> m_tilebuffer;
 
     void init () {
         m_fd = NULL;

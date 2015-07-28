@@ -35,14 +35,14 @@
 #include <iostream>
 #include <vector>
 
-#include "dassert.h"
-#include "typedesc.h"
-#include "filesystem.h"
-#include "plugin.h"
-#include "thread.h"
-#include "strutil.h"
+#include "OpenImageIO/dassert.h"
+#include "OpenImageIO/typedesc.h"
+#include "OpenImageIO/filesystem.h"
+#include "OpenImageIO/plugin.h"
+#include "OpenImageIO/thread.h"
+#include "OpenImageIO/strutil.h"
 
-#include "imageio.h"
+#include "OpenImageIO/imageio.h"
 #include "imageio_pvt.h"
 
 #include <boost/scoped_array.hpp>
@@ -113,7 +113,7 @@ bool ImageOutput::write_tiles (int xbegin, int xend, int ybegin, int yend,
 
     bool ok = true;
     stride_t pixelsize = format.size() * m_spec.nchannels;
-    std::vector<char> buf;
+    boost::scoped_array<char> buf;
     for (int z = zbegin;  z < zend;  z += std::max(1,m_spec.tile_depth)) {
         int zd = std::min (zend-z, m_spec.tile_depth);
         for (int y = ybegin;  y < yend;  y += m_spec.tile_height) {
@@ -130,7 +130,8 @@ bool ImageOutput::write_tiles (int xbegin, int xend, int ybegin, int yend,
                     ok &= write_tile (x, y, z, format, tilestart,
                                      xstride, ystride, zstride);
                 } else {
-                    buf.resize (pixelsize * m_spec.tile_pixels());
+                    if (! buf.get())
+                        buf.reset (new char [pixelsize * m_spec.tile_pixels()]);
                     OIIO::copy_image (m_spec.nchannels, xw, yh, zd,
                                 tilestart, pixelsize, xstride, ystride, zstride,
                                 &buf[0], pixelsize, pixelsize*m_spec.tile_width,
@@ -236,10 +237,13 @@ ImageOutput::append_error (const std::string& message) const
 const void *
 ImageOutput::to_native_scanline (TypeDesc format,
                                  const void *data, stride_t xstride,
-                                 std::vector<unsigned char> &scratch)
+                                 std::vector<unsigned char> &scratch,
+                                 unsigned int dither,
+                                 int yorigin, int zorigin)
 {
     return to_native_rectangle (0, m_spec.width, 0, 1, 0, 1, format, data,
-                                xstride, 0, 0, scratch);
+                                xstride, 0, 0, scratch, dither,
+                                m_spec.x, yorigin, zorigin);
 }
 
 
@@ -247,11 +251,14 @@ ImageOutput::to_native_scanline (TypeDesc format,
 const void *
 ImageOutput::to_native_tile (TypeDesc format, const void *data,
                              stride_t xstride, stride_t ystride, stride_t zstride,
-                             std::vector<unsigned char> &scratch)
+                             std::vector<unsigned char> &scratch,
+                             unsigned int dither,
+                             int xorigin, int yorigin, int zorigin)
 {
     return to_native_rectangle (0, m_spec.tile_width, 0, m_spec.tile_height,
                                 0, std::max(1,m_spec.tile_depth), format, data,
-                                xstride, ystride, zstride, scratch);
+                                xstride, ystride, zstride, scratch,
+                                dither, xorigin, yorigin, zorigin);
 }
 
 
@@ -261,7 +268,9 @@ ImageOutput::to_native_rectangle (int xbegin, int xend, int ybegin, int yend,
                                   int zbegin, int zend,
                                   TypeDesc format, const void *data,
                                   stride_t xstride, stride_t ystride, stride_t zstride,
-                                  std::vector<unsigned char> &scratch)
+                                  std::vector<unsigned char> &scratch,
+                                  unsigned int dither,
+                                  int xorigin, int yorigin, int zorigin)
 {
     // native_pixel_bytes is the size of a pixel in the FILE, including
     // the per-channel format, if specified when the file was opened.
@@ -367,16 +376,32 @@ ImageOutput::to_native_rectangle (int xbegin, int xend, int ybegin, int yend,
         // Already in float format -- leave it as-is.
         buf = (float *)data;
     } else {
-        // Convert to from 'format' to float.
+        // Convert from 'format' to float.
         buf = convert_to_float (data, (float *)&scratch[contiguoussize],
                                 rectangle_values, format);
     }
-    
+
+    if (dither && format.is_floating_point() &&
+            m_spec.format.basetype == TypeDesc::UINT8) {
+        float *ditherarea = (float *)&scratch[contiguoussize];
+        stride_t pixelsize = m_spec.nchannels * sizeof(float);
+        if (buf != ditherarea) {
+            // Need to make a copy for dither so we don't destroy user's data.
+            OIIO::copy_image (m_spec.nchannels, width, height, depth,
+                              buf, pixelsize, pixelsize, pixelsize*width,
+                              pixelsize*width*height, ditherarea,
+                              pixelsize, pixelsize*width, pixelsize*width*height);
+            buf = ditherarea;
+        }
+        OIIO::add_dither (m_spec.nchannels, width, height, depth, ditherarea,
+                          pixelsize, pixelsize*width, pixelsize*width*height,
+                          1.0f/255.0f, m_spec.alpha_channel, m_spec.z_channel,
+                          dither, 0, xorigin, yorigin, zorigin);
+    }
+
     // Convert from float to native format.
     return parallel_convert_from_float (buf, &scratch[contiguoussize+floatsize], 
-                       rectangle_values, m_spec.quant_black, m_spec.quant_white,
-                       m_spec.quant_min, m_spec.quant_max,
-                       m_spec.format);
+                                        rectangle_values, m_spec.format);
 }
 
 
@@ -495,6 +520,63 @@ ImageOutput::copy_image (ImageInput *in)
         error ("%s", in->geterror());  // copy err from in to out
     return ok;
 }
+
+
+
+bool
+ImageOutput::copy_tile_to_image_buffer (int x, int y, int z, TypeDesc format,
+                                        const void *data, stride_t xstride,
+                                        stride_t ystride, stride_t zstride,
+                                        void *image_buffer)
+{
+    if (! m_spec.tile_width || ! m_spec.tile_height) {
+        error ("Called write_tile for non-tiled image.");
+        return false;
+    }
+
+    const ImageSpec &spec (this->spec());
+    spec.auto_stride (xstride, ystride, zstride, format, spec.nchannels,
+                        spec.tile_width, spec.tile_height);
+    stride_t buf_xstride = spec.pixel_bytes();
+    stride_t buf_ystride = spec.scanline_bytes();
+    stride_t buf_zstride = spec.scanline_bytes() * spec.height;
+    stride_t offset = (x-spec.x)*buf_xstride 
+                    + (y-spec.y)*buf_ystride
+                    + (z-spec.z)*buf_zstride;
+    int xend = std::min (x+spec.tile_width,  spec.x+spec.width);
+    int yend = std::min (y+spec.tile_height, spec.y+spec.height);
+    int zend = std::min (z+spec.tile_depth,  spec.z+spec.depth);
+    int width = xend-x, height = yend-y, depth = zend-z;
+
+    // Add dither if requested -- requires making a temporary staging area
+    boost::scoped_array<float> ditherarea;
+    unsigned int dither = spec.get_int_attribute ("oiio:dither", 0);
+    if (dither && format.is_floating_point() &&
+            spec.format.basetype == TypeDesc::UINT8) {
+        stride_t pixelsize = spec.nchannels * sizeof(float);
+        ditherarea.reset (new float [pixelsize * spec.tile_pixels()]);
+        OIIO::convert_image (spec.nchannels, width, height, depth,
+                             data, format, xstride, ystride, zstride,
+                             ditherarea.get(), TypeDesc::FLOAT,
+                             pixelsize, pixelsize*spec.tile_width,
+                             pixelsize*spec.tile_width*spec.tile_height);
+        data = ditherarea.get();
+        format = TypeDesc::FLOAT;
+        xstride = pixelsize;
+        ystride = xstride * spec.tile_width;
+        zstride = ystride * spec.tile_height;
+        OIIO::add_dither (spec.nchannels, width, height, depth, (float *)data,
+                          pixelsize, pixelsize*width, pixelsize*width*height,
+                          1.0f/255.0f, spec.alpha_channel, spec.z_channel,
+                          dither, 0, x, y, z);
+    }
+
+    return OIIO::convert_image (spec.nchannels, width, height, depth,
+                                data, format, xstride, ystride, zstride,
+                                (char *)image_buffer + offset, spec.format,
+                                buf_xstride, buf_ystride, buf_zstride);
+}
+
 
 }
 OIIO_NAMESPACE_EXIT

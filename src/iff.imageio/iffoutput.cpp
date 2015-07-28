@@ -49,14 +49,13 @@ OIIO_PLUGIN_EXPORTS_END
 
 
 
-bool
-IffOutput::supports (const std::string &feature) const
+int
+IffOutput::supports (string_view feature) const
 {
-    if (feature == "tiles")
-        return true;
-
-    // Everything else, we either don't support or don't know about
-    return false;
+    return (feature == "tiles"
+         || feature == "alpha"
+         || feature == "nchannels"
+        );
 }
 
 
@@ -100,6 +99,7 @@ IffOutput::open (const std::string &name, const ImageSpec &spec,
     // tiles
     m_spec.tile_width = tile_width();
     m_spec.tile_height = tile_height();
+    m_spec.tile_depth = 1;
     
     m_fd = Filesystem::fopen (m_filename, "wb");
     if (!m_fd) {
@@ -112,6 +112,9 @@ IffOutput::open (const std::string &name, const ImageSpec &spec,
     // by any IFF reader: UINT8
     if (m_spec.format != TypeDesc::UINT8 && m_spec.format != TypeDesc::UINT16) 
         m_spec.set_format (TypeDesc::UINT8);
+
+    m_dither = (m_spec.format == TypeDesc::UINT8) ?
+                    m_spec.get_int_attribute ("oiio:dither", 0) : 0;
 
     // check if the client wants the image to be run length encoded
     // currently only RGB RLE compression is supported, we default to RLE
@@ -136,6 +139,8 @@ IffOutput::open (const std::string &name, const ImageSpec &spec,
         return false;
     }
 
+    m_buf.resize (m_spec.image_bytes());
+
     return true;
 }
 
@@ -146,6 +151,14 @@ IffOutput::write_scanline (int y, int z, TypeDesc format, const void *data,
                            stride_t xstride)
 {
     // scanline not used for Maya IFF, uses tiles instead.
+    // Emulate by copying the scanline to the buffer we're accumulating.
+    std::vector<unsigned char> scratch;
+    data = to_native_scanline (format, data, xstride, scratch,
+                               m_dither, y, z);
+    size_t scanlinesize = spec().scanline_bytes(true);
+    size_t offset = scanlinesize * (y-spec().y) +
+                    scanlinesize * spec().height * (z-spec().z);
+    memcpy (&m_buf[offset], data, scanlinesize);
     return false;
 }
 
@@ -156,17 +169,13 @@ IffOutput::write_tile (int x, int y, int z,
                        TypeDesc format, const void *data,
                        stride_t xstride, stride_t ystride, stride_t zstride)
 {
-    if (m_buf.empty ())
-        // resize buffer
-        m_buf.resize (m_spec.image_bytes());
-  
     // auto stride
     m_spec.auto_stride (xstride, ystride, zstride, format, spec().nchannels,
                         spec().tile_width, spec().tile_height);
     
     // native tile
-    std::vector<uint8_t> scratch;    
-    data = to_native_tile (format, data, xstride, ystride, zstride, scratch);   
+    data = to_native_tile (format, data, xstride, ystride, zstride, scratch,
+                           m_dither, x, y, z);   
                         
     x -= m_spec.x;   // Account for offset, so x,y are file relative, not 
     y -= m_spec.y;   // image relative  
