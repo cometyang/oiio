@@ -225,8 +225,21 @@ private:
     // Get a float tiff tag field and put it into extra_params
     void get_float_attribute (const std::string &name, int tag) {
         float f[16];
-        if (safe_tiffgetfield (name, tag, f))
-            m_spec.attribute (name, f[0]);
+        if (tag != 42034){ // EXIFTAG_LENSSPECIFICATION
+            if (safe_tiffgetfield(name, tag, f))
+                m_spec.attribute(name, f[0]);
+        }
+        else{
+            unsigned int count = 0;
+            void *data = NULL;
+            TIFFGetField(m_tif, tag, &count, &data);
+            f[0] = *((float*)data + 0);
+            f[1] = *((float*)data + 1);
+            f[2] = *((float*)data + 2);
+            f[3] = *((float*)data + 3);
+            std::cout << "Lens specification **********************:" << f[0]<<","<< f[1] <<","<<f[2]<<","<<f[3]<< "\n";
+            m_spec.attribute(name, TypeDesc(TypeDesc::FLOAT, 4), (float*)&f);
+        }
     }
 
     // Get an int tiff tag field and put it into extra_params
@@ -241,9 +254,22 @@ private:
         // Make room for two shorts, in case the tag is not the type we
         // expect, and libtiff writes a long instead.
         unsigned short s[2] = {0,0};
-        if (safe_tiffgetfield (name, tag, &s)) {
-            int i = s[0];
-            m_spec.attribute (name, i);
+        if(tag!=EXIFTAG_ISOSPEEDRATINGS){
+            if (safe_tiffgetfield (name, tag, &s)) {
+                int i = s[0];
+                m_spec.attribute (name, i);
+            }
+        }
+        else{
+            unsigned int count=0;
+            void *data = NULL;
+            TIFFGetField(m_tif, tag, &count, &data);
+            if(data!=NULL||count!=0){
+                s[0]=*(unsigned short*)data;
+                int i = s[0];
+                std::cout<<"ISO Speed Ratings **********************:"<<i<<"\n";
+                m_spec.attribute (name, i);
+            }
         }
     }
 
@@ -262,13 +288,17 @@ private:
         }
         if (tifftype == TIFF_ASCII)
             get_string_attribute (oiioname, tifftag);
-        else if (tifftype == TIFF_SHORT)
+        else if (tifftype == TIFF_SHORT){
             get_short_attribute (oiioname, tifftag);
+        }
         else if (tifftype == TIFF_LONG)
             get_int_attribute (oiioname, tifftag);
         else if (tifftype == TIFF_RATIONAL || tifftype == TIFF_SRATIONAL ||
                  tifftype == TIFF_FLOAT || tifftype == TIFF_DOUBLE)
             get_float_attribute (oiioname, tifftag);
+        else {
+            //std::cout << "Did not get the tag" << std::string(oiioname);
+        }
     }
 };
 
@@ -508,6 +538,7 @@ static const TIFF_tag_info exif_tag_table[] = {
     { EXIFTAG_METERINGMODE,	"Exif:MeteringMode",	TIFF_SHORT },
     { EXIFTAG_LIGHTSOURCE,	"Exif:LightSource",	TIFF_SHORT },
     { EXIFTAG_FLASH,	        "Exif:Flash",	        TIFF_SHORT },
+    { 42034, "Exif:LensSpecification", TIFF_RATIONAL }, // mm
     { EXIFTAG_FOCALLENGTH,	"Exif:FocalLength",	TIFF_RATIONAL }, // mm
     { EXIFTAG_SUBJECTAREA,	"Exif:SubjectArea",	TIFF_NOTYPE }, // skip
     { EXIFTAG_MAKERNOTE,	"Exif:MakerNote",	TIFF_NOTYPE },	 // skip it
@@ -560,7 +591,7 @@ TIFFInput::readspec (bool read_meta)
     TIFFGetField (m_tif, TIFFTAG_IMAGELENGTH, &height);
     TIFFGetFieldDefaulted (m_tif, TIFFTAG_IMAGEDEPTH, &depth);
     TIFFGetFieldDefaulted (m_tif, TIFFTAG_SAMPLESPERPIXEL, &nchans);
-	
+
     if (read_meta) {
         // clear the whole m_spec and start fresh
         m_spec = ImageSpec ((int)width, (int)height, (int)nchans);
@@ -588,14 +619,8 @@ TIFFInput::readspec (bool read_meta)
     // FIXME? - TIFF spec describes the positions as in resolutionunit.
     // What happens if this is not unitless pixels?  Are we interpreting
     // it all wrong?
-	
-	/// read color profile
-	unsigned int iccSize=0;
-	unsigned char *iccBuf=NULL;
-	TIFFGetField(m_tif,TIFFTAG_ICCPROFILE, &iccSize, &iccBuf);
-	create_icc_profile(iccBuf,iccSize,m_spec);
-    
-	if (TIFFGetField (m_tif, TIFFTAG_PIXAR_IMAGEFULLWIDTH, &width) == 1
+
+    if (TIFFGetField (m_tif, TIFFTAG_PIXAR_IMAGEFULLWIDTH, &width) == 1
           && width > 0)
         m_spec.full_width = width;
     if (TIFFGetField (m_tif, TIFFTAG_PIXAR_IMAGEFULLLENGTH, &height) == 1

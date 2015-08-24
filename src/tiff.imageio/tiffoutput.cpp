@@ -168,10 +168,10 @@ TIFFOutput::supports (string_view feature) const
         return true;
     if (feature == "iptc")
         return true;
-    // N.B. TIFF doesn't support arbitrary metadata.
 
     // FIXME: we could support "volumes" and "empty"
 
+    // Everything else, we either don't support or don't know about
     // Everything else, we either don't support or don't know about
     return false;
 }
@@ -244,13 +244,6 @@ TIFFOutput::open (const std::string &name, const ImageSpec &userspec,
     int orientation = m_spec.get_int_attribute("Orientation", 1);
     TIFFSetField (m_tif, TIFFTAG_ORIENTATION, orientation);
     
-	// write possible ICC profile
-	unsigned char* profile;
-	unsigned int size;
-	if(m_spec.get_icc_profile(profile,size)){
-		TIFFSetField(m_tif, TIFFTAG_ICCPROFILE, profile, size);
-	}
-
     int bps, sampformat;
     switch (m_spec.format.basetype) {
     case TypeDesc::INT8:
@@ -279,7 +272,7 @@ TIFFOutput::open (const std::string &name, const ImageSpec &userspec,
         break;
     case TypeDesc::HALF:
 #if 0
-        // Adobe extension, see http://chriscox.org/TIFFTN3d1.pdf
+        // Silently change requests for unsupported 'half' to 'float'
         // Unfortunately, Nuke 9.0, and probably many other apps we care
         // about, cannot read 16 bit float TIFFs correctly. Revisit this
         // again in future releases. (comment added Feb 2015)
@@ -325,11 +318,9 @@ TIFFOutput::open (const std::string &name, const ImageSpec &userspec,
         TIFFSetField (m_tif, TIFFTAG_EXTRASAMPLES, e, &extra[0]);
     }
 
-
-    // Default to ZIP compression if no request came with the user spec
+    // Default to LZW compression if no request came with the user spec
     if (! m_spec.find_attribute("compression"))
         m_spec.attribute ("compression", "zip");
-
 
     ImageIOParameter *param;
     const char *str = NULL;
@@ -374,7 +365,7 @@ TIFFOutput::open (const std::string &name, const ImageSpec &userspec,
     if (Strutil::iequals (m_spec.get_string_attribute ("oiio:ColorSpace"), "sRGB"))
         m_spec.attribute ("Exif:ColorSpace", 1);
 
-    // Deal with missing XResolution or YResolution, or a PixelAspectRatio
+    // Deal with all other params
     // that contradicts them.
     float X_density = m_spec.get_float_attribute ("XResolution", 1.0f);
     float Y_density = m_spec.get_float_attribute ("YResolution", 1.0f);
@@ -425,6 +416,16 @@ TIFFOutput::put_parameter (const std::string &name, TypeDesc type,
         TIFFSetField (m_tif, TIFFTAG_ARTIST, *(char**)data);
         return true;
     }
+    if (Strutil::iequals(name, "Make") && type == TypeDesc::STRING) {
+        TIFFSetField(m_tif, TIFFTAG_MAKE, *(char**)data);
+        return true;
+    }
+    if (Strutil::iequals(name, "Model") && type == TypeDesc::STRING) {
+        TIFFSetField(m_tif, TIFFTAG_MODEL, *(char**)data);
+        return true;
+    }
+
+
     if (Strutil::iequals(name, "Compression") && type == TypeDesc::STRING) {
         int compress = COMPRESSION_LZW;  // default
         const char *str = *(char **)data;
@@ -439,12 +440,10 @@ TIFFOutput::put_parameter (const std::string &name, TypeDesc type,
                 compress = COMPRESSION_PACKBITS;
             else if (Strutil::iequals (str, "ccittrle"))
                 compress = COMPRESSION_CCITTRLE;
-			else if (Strutil::iequals (str, "tiff_deflate"))
-				compress = COMPRESSION_DEFLATE;
         }
         TIFFSetField (m_tif, TIFFTAG_COMPRESSION, compress);
         // Use predictor when using compression
-        if (compress == COMPRESSION_LZW || compress == COMPRESSION_ADOBE_DEFLATE) {
+        if (compress == COMPRESSION_LZW || compress == COMPRESSION_ADOBE_DEFLATE ) {
             if (m_spec.format == TypeDesc::FLOAT || m_spec.format == TypeDesc::DOUBLE || m_spec.format == TypeDesc::HALF) {
                 TIFFSetField (m_tif, TIFFTAG_PREDICTOR, PREDICTOR_FLOATINGPOINT);
                 // N.B. Very old versions of libtiff did not support this
@@ -499,6 +498,13 @@ TIFFOutput::put_parameter (const std::string &name, TypeDesc type,
         else ok = false;
         return ok;
     }
+    if (Strutil::iequals(name, "ResolutionUnit") && (type == TypeDesc::UINT||type==TypeDesc::INT)) {
+        if (type == TypeDesc::UINT)
+            TIFFSetField (m_tif, TIFFTAG_RESOLUTIONUNIT, *(unsigned int *)data);
+        else if (type == TypeDesc::INT)
+            TIFFSetField(m_tif, TIFFTAG_RESOLUTIONUNIT, (unsigned int)*(int *)data);
+        return true;
+    }
     if (Strutil::iequals(name, "tiff:RowsPerStrip")
           && ! m_spec.tile_width /* don't set rps for tiled files */
           && m_planarconfig == PLANARCONFIG_CONTIG /* only for contig */) {
@@ -549,7 +555,6 @@ TIFFOutput::put_parameter (const std::string &name, TypeDesc type,
 }
 
 
-
 bool
 TIFFOutput::write_exif_data ()
 {
@@ -573,8 +578,7 @@ TIFFOutput::write_exif_data ()
         if (exif_tag_lookup (p.name(), tag, tifftype, count) &&
                 tifftype != TIFF_NOTYPE) {
             if (tag == EXIFTAG_SECURITYCLASSIFICATION ||
-                tag == EXIFTAG_IMAGEHISTORY ||
-                tag == EXIFTAG_ISOSPEEDRATINGS)
+                tag == EXIFTAG_IMAGEHISTORY )
                 continue;   // libtiff doesn't understand these
             any_exif = true;
             break;
@@ -598,31 +602,159 @@ TIFFOutput::write_exif_data ()
     for (size_t i = 0, e = m_spec.extra_attribs.size(); i < e; ++i) {
         const ImageIOParameter &p (m_spec.extra_attribs[i]);
         int tag, tifftype, count;
-        if (exif_tag_lookup (p.name(), tag, tifftype, count) &&
-                tifftype != TIFF_NOTYPE) {
+        if (exif_tag_lookup(p.name(), tag, tifftype, count) &&
+            tifftype != TIFF_NOTYPE) {
             if (tag == EXIFTAG_SECURITYCLASSIFICATION ||
-                tag == EXIFTAG_IMAGEHISTORY ||
-                tag == EXIFTAG_ISOSPEEDRATINGS)
+                tag == EXIFTAG_IMAGEHISTORY)
                 continue;   // libtiff doesn't understand these
             bool ok = false;
             if (tifftype == TIFF_ASCII) {
-                ok = TIFFSetField (m_tif, tag, *(char**)p.data());
-            } else if ((tifftype == TIFF_SHORT || tifftype == TIFF_LONG) &&
-                       p.type() == TypeDesc::SHORT) {
-                ok = TIFFSetField (m_tif, tag, (int)*(short *)p.data());
-            } else if ((tifftype == TIFF_SHORT || tifftype == TIFF_LONG) &&
-                       p.type() == TypeDesc::INT) {
-                ok = TIFFSetField (m_tif, tag, *(int *)p.data());
-            } else if ((tifftype == TIFF_RATIONAL || tifftype == TIFF_SRATIONAL) &&
-                       p.type() == TypeDesc::FLOAT) {
-                ok = TIFFSetField (m_tif, tag, *(float *)p.data());
-            } else if ((tifftype == TIFF_RATIONAL || tifftype == TIFF_SRATIONAL) &&
-                       p.type() == TypeDesc::DOUBLE) {
-                ok = TIFFSetField (m_tif, tag, *(double *)p.data());
+                ok = TIFFSetField(m_tif, tag, *(char**)p.data());
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+            }
+            else if ((tifftype == TIFF_SHORT) && tag == EXIFTAG_ISOSPEEDRATINGS) {
+                short iso[1];
+                if (p.type() == TypeDesc::SHORT){
+                    iso[0] = *(short *)p.data();
+                }
+                else if (p.type() == TypeDesc::STRING){
+                    iso[0] = (short)strtoul(*(char**)p.data(), NULL, 0);
+                }
+                else if (p.type() == TypeDesc::UINT){
+                    iso[0] = (short)*(unsigned int *)p.data();
+                }
+                else if (p.type() == TypeDesc::INT){
+                    iso[0] = (short)*(int *)p.data();
+                }
+                else{
+                    //std::cout << "Not find match type for iso speed rating\n";
+                }
+                ok = TIFFSetField(m_tif, tag, 1, iso);
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+            }
+            else if ((tifftype == TIFF_SHORT || tifftype == TIFF_LONG) &&
+                p.type() == TypeDesc::SHORT) {
+                ok = TIFFSetField(m_tif, tag, (int)*(short *)p.data());
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+
+            }
+            else if ((tifftype == TIFF_SHORT || tifftype == TIFF_LONG) &&
+                p.type() == TypeDesc::INT) {
+                ok = TIFFSetField(m_tif, tag, *(int *)p.data());
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+            }
+            else if ((tifftype == TIFF_RATIONAL || tifftype == TIFF_SRATIONAL) &&
+                p.type() == TypeDesc::FLOAT) {
+                ok = TIFFSetField(m_tif, tag, *(float *)p.data());
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+            }
+            else if ((tifftype == TIFF_RATIONAL || tifftype == TIFF_SRATIONAL) &&
+                p.type() == TypeDesc::DOUBLE) {
+                ok = TIFFSetField(m_tif, tag, *(double *)p.data());
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+            }
+            else if ((tifftype == TIFF_RATIONAL || tifftype == TIFF_SRATIONAL) &&
+                p.type() == TypeDesc::STRING) {
+                std::string fracstr = *(char**)p.data();
+                size_t pos = fracstr.find("/");
+                std::string nom = fracstr.substr(0, pos);
+                std::string den = fracstr.substr(pos + 1, std::string::npos);
+
+                float n1 = ::atof(nom.c_str());
+                float n2 = ::atof(den.c_str());
+                float number = n1 / n2;
+                ok = TIFFSetField(m_tif, tag, number);
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+                else{
+                    std::cout << "Set successfully " << p.name() << " which type is " << p.type() << "and value is:" << fracstr << " to" << number << " " << nom << "/" << den << "\n";
+                }
+            }
+            else if ((tifftype == TIFF_SHORT || tifftype == TIFF_LONG) &&
+                p.type() == TypeDesc::STRING){
+                //ok = TIFFSetField(m_tif, tag, *( *)p.data());
+
+                if (tifftype == TIFF_SHORT){
+                    int number = (int)strtoul(*(char**)p.data(), NULL, 0);
+                    ok = TIFFSetField(m_tif, tag, number);
+                }
+                else if (tifftype == TIFF_LONG){
+                    int number = (int)strtoul(*(char**)p.data(), NULL, 0);
+                    ok = TIFFSetField(m_tif, tag, number);
+                }
+                else{
+                    std::cout << "Unhandled EXIF:" << p.name() << " " << p.type() << " value" << *(char**)p.data() << " and tiff_type=" << tifftype << "\n";
+                }
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+
+            }
+            else if ((tifftype == TIFF_SHORT || tifftype == TIFF_LONG) &&
+                p.type() == TypeDesc::UINT){
+                //ok = TIFFSetField(m_tif, tag, *( *)p.data());
+
+                if (tifftype == TIFF_SHORT){
+                    int number = (int)*(unsigned int *)p.data();
+                    ok = TIFFSetField(m_tif, tag, number);
+                }
+                else if (tifftype == TIFF_LONG){
+                    int number = *(int *)p.data();
+                    ok = TIFFSetField(m_tif, tag, number);
+                }
+                else{
+                    std::cout << "Unhandled EXIF:" << p.name() << " " << p.type() << " value" << *(int*)p.data() << " and tiff_type=" << tifftype << "\n";
+                }
+                if (ok == false){
+                    std::cout << "Try to set " << p.name() << " which type is " << p.type() << ", but failed\n";
+                    ok = true;
+                }
+
+            }
+            else if ((tifftype == TIFF_RATIONAL) && tag == 42034){
+           
+                float lensSpecification[4];
+                float* dataarr = (float*)p.data();
+                lensSpecification[0] = dataarr[0];
+                lensSpecification[1] = dataarr[1];
+                lensSpecification[2] = dataarr[2];
+                lensSpecification[3] = dataarr[3];
+                std::cout << "Lens:" << lensSpecification[0] << "," << lensSpecification[1] << "," << lensSpecification[2] << "," << lensSpecification[3]<<"\n";
+                ok = TIFFSetField(m_tif, tag, 4, lensSpecification);
+                TIFFSetField(m_tif, TIFFTAG_LENSINFO, 4, lensSpecification);
+                std::cout << "HANLED EXIF " << p.name() << " " << p.type() << " and tiff_type=" << tifftype << "\n";
+            }
+            if (tag == EXIFTAG_ISOSPEEDRATINGS){
+                std::cout<< p.name() << " " << p.type() << " and tiff_type=" << tifftype << "\n";
             }
             if (! ok) {
-                // std::cout << "Unhandled EXIF " << p.name() << " " << p.type() << "\n";
+
+                 std::cout << "Unhandled EXIF " << p.name() << " " << p.type() << " and tiff_type="<<tifftype<<"\n";
             }
+        }
+        else{
+            std::cout << "Not find in EXIF TAG Dictionary " << p.name() << " " << p.type() << "\n";
         }
     }
 
@@ -637,7 +769,6 @@ TIFFOutput::write_exif_data ()
     TIFFSetDirectory (m_tif, 0);
     TIFFSetField (m_tif, TIFFTAG_EXIFIFD, dir_offset);
 #endif
-
     return true;  // all is ok
 }
 

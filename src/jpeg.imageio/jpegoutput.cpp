@@ -165,12 +165,12 @@ JpgOutput::open (const std::string &name, const ImageSpec &newspec,
 		}
 	}
 
-	int optimize_coding=0; //False
+	/*int optimize_coding=0; //False
 	const ImageIOParameter *optimize_cod=newspec.find_attribute("OptimizeCoding",TypeDesc::INT);
 	if(optimize_cod){
 		optimize_coding=*(const int*)optimize_cod->data();
 		m_cinfo.optimize_coding = optimize_coding; // TRUE
-	}
+	}*/
 
     if (m_spec.nchannels == 3 || m_spec.nchannels == 4) {
         m_cinfo.input_components = 3;
