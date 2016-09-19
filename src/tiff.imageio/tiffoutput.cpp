@@ -440,6 +440,8 @@ TIFFOutput::put_parameter (const std::string &name, TypeDesc type,
                 compress = COMPRESSION_PACKBITS;
             else if (Strutil::iequals (str, "ccittrle"))
                 compress = COMPRESSION_CCITTRLE;
+            else if (Strutil::iequals(str, "jpeg"))
+                compress = COMPRESSION_JPEG;
         }
         TIFFSetField (m_tif, TIFFTAG_COMPRESSION, compress);
         // Use predictor when using compression
@@ -851,7 +853,9 @@ TIFFOutput::write_scanline (int y, int z, TypeDesc format,
     else {
         ++m_checkpointItems;
     }
-    
+#ifdef JPEG_SUPPORT
+        TIFFCheckpointDirectory (m_tif);
+#endif   
     return true;
 }
 
@@ -919,7 +923,9 @@ TIFFOutput::write_tile (int x, int y, int z,
     else {
         ++m_checkpointItems;
     }
-    
+#ifdef JPEG_SUPPORT
+        TIFFCheckpointDirectory (m_tif);
+#endif
     return true;
 }
 
