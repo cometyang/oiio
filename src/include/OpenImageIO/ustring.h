@@ -143,8 +143,7 @@
 #define NULL 0
 #endif
 
-OIIO_NAMESPACE_ENTER
-{
+OIIO_NAMESPACE_BEGIN
 
 class OIIO_API ustring {
 public:
@@ -735,7 +734,8 @@ public:
     }
 };
 
-typedef ustringPtrIsLess ustringHashIsLess;   // DEPRECATED
+OIIO_DEPRECATED("Use ustringPtrIsLess [1.6]")
+typedef ustringPtrIsLess ustringHashIsLess;
 
 
 
@@ -752,7 +752,6 @@ inline bool iequals (const std::string &a, ustring b) {
 }
 
 
-}
-OIIO_NAMESPACE_EXIT
+OIIO_NAMESPACE_END
 
 #endif // OPENIMAGEIO_USTRING_H

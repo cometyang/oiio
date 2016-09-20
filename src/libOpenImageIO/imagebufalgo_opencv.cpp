@@ -49,8 +49,7 @@
 
 
 
-OIIO_NAMESPACE_ENTER
-{
+OIIO_NAMESPACE_BEGIN
 
 
 
@@ -147,9 +146,9 @@ ImageBufAlgo::to_IplImage (const ImageBuf &src)
 
 namespace {
 
+#ifdef USE_OPENCV
 static mutex opencv_mutex;
 
-#ifdef USE_OPENCV
 class CameraHolder {
 public:
     CameraHolder () { }
@@ -220,5 +219,4 @@ ImageBufAlgo::capture_image (ImageBuf &dst, int cameranum, TypeDesc convert)
 }
 
 
-}
-OIIO_NAMESPACE_EXIT
+OIIO_NAMESPACE_END

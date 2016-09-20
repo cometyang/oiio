@@ -138,7 +138,7 @@ typedef unsigned long long U64;
 #endif
 
 
-OIIO_NAMESPACE_ENTER {
+OIIO_NAMESPACE_BEGIN
 namespace xxhash {
 
 
@@ -229,7 +229,9 @@ static const int one = 1;
 //**************************************
 // Macros
 //**************************************
-#define XXH_STATIC_ASSERT(c)   { enum { XXH_static_assert = 1/(!!(c)) }; }    // use only *after* variable declarations
+// FIXME -- replace with with static_assert when we're on C++11.
+// This construct gives warnings for some compilers.
+#define XXH_STATIC_ASSERT(c)   { enum { XXH_static_assert = 1/int(!!(c)) }; }    // use only *after* variable declarations
 
 
 //****************************
@@ -943,4 +945,4 @@ unsigned long long XXH64_digest (const XXH64_state_t* state_in)
 
 
 } // namespace xxhash
-} OIIO_NAMESPACE_EXIT
+OIIO_NAMESPACE_END
